@@ -95,8 +95,8 @@ class RefCOCOTrainDataset(Dataset):
         image_path = os.path.join(self.vis_root, image_file)
         image = Image.open(image_path).convert("RGB")
         image_orig_size = image.size
-        image=self.processor.preprocess(
-                    image, return_tensors='pt')['pixel_values'][0]
+        image = self.processor.preprocess(
+            image, return_tensors='pt')['pixel_values'][0]
         image_new_size = [image.shape[1], image.shape[2]]
 
         image_new_size = [100, 100]
@@ -134,6 +134,39 @@ class RefCOCOTrainDataset(Dataset):
         data = {
             "instruction_input": instruction,
             "answer": data['bbox'],
+            "image_id": data['image_id'],
+        }
+
+        data = self.prepare_hf_datasets(data)
+        data['pixel_values'] = image
+        return data
+
+
+class InvRefCOCOTrainDataset(RefCOCOTrainDataset):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.instruction_pool = [
+            "[identify] {}",
+            "[identify] what object is in this location {}",
+            "[identify] identify the object present at this location {}",
+            "[identify] what is it in {}",
+            "[identify] describe this object in {}",
+            "[identify] this {} is",
+            "[identify] the object in {} is",
+        ]
+
+    def __getitem__(self, index):
+        data = self.preprocess(index)
+        instruction = random.choice(
+            self.instruction_pool).format(data['bbox'])
+
+        instruction = "<Img><ImageHere></Img> {} ".format(instruction)
+
+        image = data.pop('image')
+        data = {
+            "instruction_input": instruction,
+            "answer": self.text_processor(data['refer_sentence']),
             "image_id": data['image_id'],
         }
 
