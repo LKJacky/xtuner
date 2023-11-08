@@ -5,8 +5,9 @@ from .llava import LLaVADataset
 from .modelscope import process_ms_dataset
 from .moss_sft import MOSSSFTDataset
 from .utils import expand2square
+from .refcoco import RefCOCOTrainDataset
 
 __all__ = [
     'process_hf_dataset', 'ConcatDataset', 'MOSSSFTDataset',
-    'process_ms_dataset', 'LLaVADataset', 'expand2square'
+    'process_ms_dataset', 'LLaVADataset', 'expand2square', 'RefCOCOTrainDataset'
 ]
