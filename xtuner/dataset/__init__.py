@@ -20,4 +20,6 @@ __all__ = [
     'decode_base64_to_image', 'load_image', 'process_ms_dataset',
     'load_intern_repo_tokenized_dataset',
     'load_intern_repo_untokenized_dataset', 'build_packed_dataset'
+    'process_intern_repo_dataset', 'RefCOCOTrainDataset', 'RefCOCOTrainDataset',
+    'InvRefCOCOTrainDataset'
 ]
