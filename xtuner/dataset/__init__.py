@@ -10,7 +10,11 @@ from .llava import LLaVADataset
 from .modelscope import process_ms_dataset
 from .moss_sft import MOSSSFTDataset
 from .utils import decode_base64_to_image, expand2square, load_image
-from .refcoco import RefCOCOTrainDataset, InvRefCOCOTrainDataset
+from .refcoco_json import (
+    RefCOCOJsonDataset,
+    RefCOCOJsonEvalDataset,
+    InvRefCOCOJsonDataset,
+)
 
 # ignore FutureWarning in hf datasets
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -23,4 +27,17 @@ __all__ = [
     'load_intern_repo_untokenized_dataset', 'build_packed_dataset'
     'process_intern_repo_dataset', 'RefCOCOTrainDataset', 'RefCOCOTrainDataset',
     'InvRefCOCOTrainDataset'
+    "process_hf_dataset",
+    "ConcatDataset",
+    "MOSSSFTDataset",
+    "process_ms_dataset",
+    "LLaVADataset",
+    "expand2square",
+    "decode_base64_to_image",
+    "load_image",
+    "process_ms_dataset",
+    "process_intern_repo_dataset",
+    "RefCOCOJsonDataset",
+    "RefCOCOJsonEvalDataset",
+    "InvRefCOCOJsonDataset",
 ]

@@ -18,7 +18,6 @@ from .sql_map_fn import sql_map_fn
 from .stack_exchange_map_fn import stack_exchange_map_fn
 from .tiny_codes_map_fn import tiny_codes_map_fn
 from .wizardlm_map_fn import wizardlm_map_fn
-from .refcoco_map_fn import refcoco_map_fn
 
 DATASET_FORMAT_MAPPING = dict(
     alpaca=alpaca_map_fn,
@@ -71,7 +70,6 @@ __all__ = [
     "msagent_react_map_fn",
     "pretrain_map_fn",
     "default_map_fn",
-    "refcoco_map_fn",
     "llava_map_fn",
     "llava_image_only_map_fn",
 ]
