@@ -17,11 +17,66 @@ from xtuner.dataset.map_fns import refcoco_map_fn
 from xtuner.dataset.refcoco import Blip2ImageTrainProcessor
 from xtuner.registry import BUILDER
 from xtuner.dataset.refcoco_json import RefCOCOJsonDataset
+from xtuner.dataset import LLaVADataset
+import random
+from transformers import AutoTokenizer, CLIPImageProcessor
+from xtuner.utils import PROMPT_TEMPLATE
+from xtuner.dataset.map_fns import llava_map_fn, template_map_fn_factory
 
 PATH = "xtuner/configs/llava/vicuna_7b_v15_clip_vit_large_p14_336/finetune/llava_vicuna_7b_v15_clip_vit_large_p14_336_e1_gpu8_finetune.py"
 
 
+def refcoco_json_map_fn(data):
+    """
+    build conversition data from refcoco json data as below
+
+    "id": "xxx",
+    "image": "xxx.jpg",
+    "conversations": [
+      {
+        "from": "human",
+        "value": "xxxx"
+      },
+      {
+        "from": "gpt",
+        "value": "xxx"
+      }
+    """
+    conversation = [
+        {"from": "human", "value": ""},
+        {"from": "gpt", "value": ""},
+    ]
+    instruction_pool = [
+        "[refer] {}",
+        "[refer] give me the location of {}",
+        "[refer] where is {} ?",
+        "[refer] from this image, tell me the location of {}",
+        "[refer] the location of {} is",
+        "[refer] could you tell me the location for {} ?",
+        "[refer] where can I locate the {} ?",
+    ]
+
+    instruction = random.choice(instruction_pool).format(data["sents"])
+    answer = "{{<{}><{}><{}><{}>}}".format(
+        data["bbox"][0], data["bbox"][1], data["bbox"][2], data["bbox"][3]
+    )
+    conversation[0]["value"] = instruction + "\n<image>"
+    conversation[1]["value"] = answer
+    return llava_map_fn({"conversations": conversation})
+
+
 class TestRefCOCOJson(TestCase):
+    def _print(self, item):
+        for key in item:
+            value = item[key]
+            if isinstance(value, torch.Tensor):
+                print(f"{key}\n{value.shape}")
+            elif isinstance(value, list):
+                print(f"{key}\n{value}\n{len(value)}")
+            else:
+                print(f"{key}\n{value}")
+            print()
+
     def test_generate(self):
         save = False
         save_path = "data/llava_data/RefCOCOJson"
@@ -36,52 +91,40 @@ class TestRefCOCOJson(TestCase):
             with open(save_path + "/train.json", "w") as f:
                 json.dump(data, f, indent=4)
 
+    def test_llava_dataset(self):
+        tokenizer = AutoTokenizer.from_pretrained("lmsys/vicuna-7b-v1.5")
+        dataset = LLaVADataset(
+            data_path="data/llava_data/LLaVA-Instruct-150K/complex_reasoning_77k.json",
+            image_folder="data/llava_data/llava_images",
+            tokenizer=tokenizer,
+            image_processor=CLIPImageProcessor.from_pretrained(
+                "openai/clip-vit-large-patch14-336"
+            ),
+            max_dataset_length=None,
+            dataset_map_fn=llava_map_fn,
+            template_map_fn=dict(
+                type=template_map_fn_factory, template=PROMPT_TEMPLATE.vicuna
+            ),
+            max_length=2048,
+            pad_image_to_square=False,
+        )
+        self._print(dataset[0])
 
-class TestRef(TestCase):
-    def test_ref(self):
-        config_path = PATH
-        dataset_config = Config.fromfile(config_path)["llava_dataset"]
-
-        refcoco_dataset_config = copy.copy(dataset_config)
-        refcoco_dataset_config["type"] = RefCOCOTrainDataset
-        refcoco_dataset_config["data_path"] = "data/refcoco/refcoco_annotations"
-        refcoco_dataset_config["image_folder"] = "data/refcoco/train2014"
-        refcoco_dataset_config["dataset_map_fn"] = refcoco_map_fn
-        # refcoco_dataset_config["processor"] = dict(type=Blip2ImageTrainProcessor)
-        refcoco_set = BUILDER.build(refcoco_dataset_config)
-        item = refcoco_set[0]
-        self._print(item)
-        print(len(refcoco_set))
-
-    def test_inv_ref(self):
-        config_path = PATH
-        dataset_config = Config.fromfile(config_path)["llava_dataset"]
-
-        refcoco_dataset_config = copy.copy(dataset_config)
-        refcoco_dataset_config["type"] = InvRefCOCOTrainDataset
-        refcoco_dataset_config["data_path"] = "data/refcoco/refcoco_annotations"
-        refcoco_dataset_config["image_folder"] = "data/refcoco/train2014"
-        refcoco_dataset_config["dataset_map_fn"] = refcoco_map_fn
-
-        refcoco_set = BUILDER.build(refcoco_dataset_config)
-        item = refcoco_set[0]
-        self._print(item)
-
-    def test_llava(self):
-        config_path = PATH
-        dataset_config = Config.fromfile(config_path)["llava_dataset"]
-
-        dataset = BUILDER.build(dataset_config)
-        item = dataset[0]
-        self._print(item)
-
-    def _print(self, item):
-        for key in item:
-            value = item[key]
-            if isinstance(value, torch.Tensor):
-                print(f"{key}\n{value.shape}")
-            elif isinstance(value, list):
-                print(f"{key}\n{value}\n{len(value)}")
-            else:
-                print(f"{key}\n{value}")
-            print()
+    def test_data_load(self):
+        tokenizer = AutoTokenizer.from_pretrained("lmsys/vicuna-7b-v1.5")
+        dataset = LLaVADataset(
+            data_path="data/llava_data/RefCOCOJson/train.json",
+            image_folder="data/llava_data/llava_images",
+            tokenizer=tokenizer,
+            image_processor=CLIPImageProcessor.from_pretrained(
+                "openai/clip-vit-large-patch14-336"
+            ),
+            max_dataset_length=None,
+            dataset_map_fn=refcoco_json_map_fn,
+            template_map_fn=dict(
+                type=template_map_fn_factory, template=PROMPT_TEMPLATE.vicuna
+            ),
+            max_length=2048,
+            pad_image_to_square=False,
+        )
+        self._print(dataset[0])
