@@ -163,3 +163,51 @@ class RefCOCOJsonDataset(LLaVADataset):
                     data[data_id] = data_item
 
         return list(data.values()), list(duplicate_data.values())
+
+
+class RefCOCOJsonEvalDataset(RefCOCOJsonDataset):
+    instruction_pool = ["[refer] give me the location of {}"]
+
+
+class InvRefCOCOJsonDataset(RefCOCOJsonDataset):
+    instruction_pool = [
+        "[identify] {}",
+        "[identify] what object is in this location {}",
+        "[identify] identify the object present at this location {}",
+        "[identify] what is it in {}",
+        "[identify] describe this object in {}",
+        "[identify] this {} is",
+        "[identify] the object in {} is",
+    ]
+
+    @classmethod
+    def gen_refcoco_conversations(cls, data, instruction_template="{}"):
+        """
+        build conversition data from refcoco json data as below
+
+        "id": "xxx",
+        "image": "xxx.jpg",
+        "conversations": [
+        {
+            "from": "human",
+            "value": "xxxx"
+        },
+        {
+            "from": "gpt",
+            "value": "xxx"
+        }
+        """
+
+        conversation = [
+            {"from": "human", "value": ""},
+            {"from": "gpt", "value": ""},
+        ]
+        bbox_str = "{{<{}><{}><{}><{}>}}".format(
+            data["bbox"][0], data["bbox"][1], data["bbox"][2], data["bbox"][3]
+        )
+        instruction = instruction_template.format(bbox_str)
+        answer = data["sents"]
+
+        conversation[0]["value"] = instruction + "\n<image>"
+        conversation[1]["value"] = answer
+        return conversation
