@@ -9,14 +9,14 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           BitsAndBytesConfig, CLIPImageProcessor,
                           CLIPVisionModel)
 
-from xtuner.dataset import LLaVADataset
+from xtuner.dataset import LLaVADataset,ConcatDataset
 from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.dataset.map_fns import llava_map_fn, template_map_fn_factory
 from xtuner.dataset.samplers import LengthGroupedSampler
 from xtuner.engine import DatasetInfoHook, EvaluateChatHook
 from xtuner.model import LLaVAModel
 from xtuner.utils import PROMPT_TEMPLATE
-from xtuner.dataset.refcoco_json import RefCOCOJsonDataset
+from xtuner.dataset.refcoco_json import RefCOCOJsonDataset,InvRefCOCOJsonDataset
 
 #######################################################################
 #                          PART 1  Settings                           #
@@ -101,7 +101,7 @@ model = dict(
 #######################################################################
 #                      PART 3  Dataset & Dataloader                   #
 #######################################################################
-llava_dataset = dict(
+refcoco_dataset = dict(
     type=RefCOCOJsonDataset,
     data_path='data/llava_data/RefCOCOJson/train.json',
     image_folder=image_folder,
@@ -112,6 +112,22 @@ llava_dataset = dict(
         type=template_map_fn_factory, template=prompt_template),
     max_length=max_length,
     pad_image_to_square=True)
+inv_refcoco_dataset = dict(
+    type=InvRefCOCOJsonDataset,
+    data_path='data/llava_data/RefCOCOJson/train.json',
+    image_folder=image_folder,
+    tokenizer=tokenizer,
+    image_processor=image_processor,
+    dataset_map_fn=llava_map_fn,
+    template_map_fn=dict(
+        type=template_map_fn_factory, template=prompt_template),
+    max_length=max_length,
+    pad_image_to_square=True)
+llava_dataset=dict(
+    type=ConcatDataset,
+    datasets=[refcoco_dataset,inv_refcoco_dataset]
+)
+
 
 train_dataloader = dict(
     batch_size=batch_size,

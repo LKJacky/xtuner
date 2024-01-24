@@ -179,6 +179,23 @@ class RefCOCOJsonDataset(LLaVADataset):
 
         return list(data.values()), list(duplicate_data.values())
 
+    def __getitem__(self, index):
+        data_dict = self.text_data[index]
+        if data_dict.get('image', None) is not None:
+            image_file = data_dict['image']
+            image = Image.open(os.path.join(self.image_folder,
+                                            image_file)).convert('RGB')
+            crop_size = self.image_processor.crop_size
+            image = image.resize((crop_size['width'], crop_size['height']))
+            image = self.image_processor.preprocess(
+                image, return_tensors='pt')['pixel_values'][0]
+            data_dict['pixel_values'] = image
+        else:
+            crop_size = self.image_processor.crop_size
+            data_dict['pixel_values'] = torch.zeros(3, crop_size['height'],
+                                                    crop_size['width'])
+        return data_dict
+
 
 class RefCOCOJsonEvalDataset(RefCOCOJsonDataset):
     instruction_pool = ["[refer] give me the location of {}"]
