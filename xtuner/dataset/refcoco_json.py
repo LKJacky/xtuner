@@ -4,94 +4,118 @@ from .refcoco import REFER
 from collections import defaultdict
 from PIL import Image
 import json
-import random
 import copy
-from functools import partial
 
-from torch.utils.data import Dataset
+from .llava import LLaVADataset
+import torch
+from datasets import Dataset as HFDataset
+from datasets import DatasetDict
+from mmengine.config import Config, ConfigDict
+from PIL import Image
 
-
-def computeIoU(bbox1, bbox2):
-    x1, y1, x2, y2 = bbox1
-    x3, y3, x4, y4 = bbox2
-    intersection_x1 = max(x1, x3)
-    intersection_y1 = max(y1, y3)
-    intersection_x2 = min(x2, x4)
-    intersection_y2 = min(y2, y4)
-    intersection_area = max(0, intersection_x2 - intersection_x1 + 1) * max(
-        0, intersection_y2 - intersection_y1 + 1
-    )
-    bbox1_area = (x2 - x1 + 1) * (y2 - y1 + 1)
-    bbox2_area = (x4 - x3 + 1) * (y4 - y3 + 1)
-    union_area = bbox1_area + bbox2_area - intersection_area
-    iou = intersection_area / union_area
-    return iou
+from xtuner.registry import BUILDER
+from .huggingface import process_hf_dataset
+import copy
 
 
-# dataset
-
-
-class RefCOCOJsonDataset(Dataset):
-    """
-    "id": data_id,
-    "img_id": image_name,
-    "sents": sent,
-    "bbox": bbox,
-    "height": image.height,
-    "width": image.width,
-    ##
-    'instruction_input': ins,
-    'answer': ans,
-    """
+class RefCOCOJsonDataset(LLaVADataset):
+    instruction_pool = [
+        "[refer] {}",
+        "[refer] give me the location of {}",
+        "[refer] where is {} ?",
+        "[refer] from this image, tell me the location of {}",
+        "[refer] the location of {} is",
+        "[refer] could you tell me the location for {} ?",
+        "[refer] where can I locate the {} ?",
+    ]
 
     def __init__(
         self,
-        ann_path,
-        image_path,
-        vis_processor=None,
-        reformatter_args={"type": "train_d1"},
+        data_path,
+        image_folder,
+        tokenizer,
+        image_processor,
+        max_dataset_length=None,
+        dataset_map_fn=None,
+        template_map_fn=None,
+        max_length=2048,
+        pad_image_to_square=False,
     ):
-        self.reformatter_map = {
-            "train_d1": train_d1,
-            "train_c1": train_c1,
-            "base_eval": base_eval,
-            "train_d2": train_d2,
-            "train_c1_construct": train_c1_construct,
-        }
-        data: dict = json.load(open(ann_path))
-        if isinstance(data, dict):
-            data = list(data.values())
-        self.data = data
-        if reformatter_args is not None:
-            self.data = self.build_reforder(reformatter_args)(self.data)
+        json_data = json.load(open(data_path))
 
-        self.image_path = image_path
-        self.vis_processor = vis_processor
+        ######################################################
+        # Only this part is different from LLaVADataset.__init__
+        json_data = self.reformat_data(json_data)
+        ######################################################
 
-    def build_reforder(self, reformatter_args):
-        assert "type" in reformatter_args, f"{reformatter_args}"
-        type = reformatter_args.pop("type")
-        return self.reformatter_map[type](**reformatter_args)
-
-    def __getitem__(self, index):
-        sample = copy.copy(self.data[index])
-        image = self.load_image(sample["img_id"])
-
-        sample["bbox"] = torch.tensor(sample["bbox"])
-        sample.update(
-            {
-                "image": image,
-            }
+        for idx in range(len(json_data)):
+            if isinstance(json_data[idx]["id"], int):
+                json_data[idx]["id"] = str(json_data[idx]["id"])
+        json_data = DatasetDict({"train": HFDataset.from_list(json_data)})
+        self.text_data = process_hf_dataset(
+            dataset=json_data,
+            tokenizer=tokenizer,
+            max_length=max_length,
+            dataset_map_fn=dataset_map_fn,
+            template_map_fn=template_map_fn,
+            split="train",
+            max_dataset_length=max_dataset_length,
+            remove_unused_columns=False,
+            pack_to_max_length=False,
+            with_image_token=True,
         )
-        return sample
 
-    def __len__(self):
-        return len(self.data)
+        self.image_folder = image_folder
+        if (
+            isinstance(image_processor, dict)
+            or isinstance(image_processor, Config)
+            or isinstance(image_processor, ConfigDict)
+        ):
+            self.image_processor = BUILDER.build(image_processor)
+        else:
+            self.image_processor = image_processor
+        self.pad_image_to_square = pad_image_to_square
 
-    def load_image(self, image_id):
-        image = Image.open(self.image_path + "/" + image_id + ".jpg").convert("RGB")
-        image = self.vis_processor(image)
-        return image
+    def reformat_data(self, json_data):
+        new_json_data = []
+        for sample in json_data:
+            for instruction_template in self.instruction_pool:
+                sample["conversations"] = self.gen_refcoco_conversations(
+                    sample, instruction_template
+                )
+                new_json_data.append(copy.deepcopy(sample))
+        return new_json_data
+
+    @classmethod
+    def gen_refcoco_conversations(cls, data, instruction_template="{}"):
+        """
+        build conversition data from refcoco json data as below
+
+        "id": "xxx",
+        "image": "xxx.jpg",
+        "conversations": [
+        {
+            "from": "human",
+            "value": "xxxx"
+        },
+        {
+            "from": "gpt",
+            "value": "xxx"
+        }
+        """
+
+        conversation = [
+            {"from": "human", "value": ""},
+            {"from": "gpt", "value": ""},
+        ]
+
+        instruction = instruction_template.format(data["sents"])
+        answer = "{{<{}><{}><{}><{}>}}".format(
+            data["bbox"][0], data["bbox"][1], data["bbox"][2], data["bbox"][3]
+        )
+        conversation[0]["value"] = instruction + "\n<image>"
+        conversation[1]["value"] = answer
+        return conversation
 
     @classmethod
     def get_data_json(

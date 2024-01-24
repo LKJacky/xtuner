@@ -26,45 +26,6 @@ from xtuner.dataset.map_fns import llava_map_fn, template_map_fn_factory
 PATH = "xtuner/configs/llava/vicuna_7b_v15_clip_vit_large_p14_336/finetune/llava_vicuna_7b_v15_clip_vit_large_p14_336_e1_gpu8_finetune.py"
 
 
-def refcoco_json_map_fn(data):
-    """
-    build conversition data from refcoco json data as below
-
-    "id": "xxx",
-    "image": "xxx.jpg",
-    "conversations": [
-      {
-        "from": "human",
-        "value": "xxxx"
-      },
-      {
-        "from": "gpt",
-        "value": "xxx"
-      }
-    """
-    conversation = [
-        {"from": "human", "value": ""},
-        {"from": "gpt", "value": ""},
-    ]
-    instruction_pool = [
-        "[refer] {}",
-        "[refer] give me the location of {}",
-        "[refer] where is {} ?",
-        "[refer] from this image, tell me the location of {}",
-        "[refer] the location of {} is",
-        "[refer] could you tell me the location for {} ?",
-        "[refer] where can I locate the {} ?",
-    ]
-
-    instruction = random.choice(instruction_pool).format(data["sents"])
-    answer = "{{<{}><{}><{}><{}>}}".format(
-        data["bbox"][0], data["bbox"][1], data["bbox"][2], data["bbox"][3]
-    )
-    conversation[0]["value"] = instruction + "\n<image>"
-    conversation[1]["value"] = answer
-    return llava_map_fn({"conversations": conversation})
-
-
 class TestRefCOCOJson(TestCase):
     def _print(self, item):
         for key in item:
@@ -112,7 +73,7 @@ class TestRefCOCOJson(TestCase):
 
     def test_data_load(self):
         tokenizer = AutoTokenizer.from_pretrained("lmsys/vicuna-7b-v1.5")
-        dataset = LLaVADataset(
+        dataset = RefCOCOJsonDataset(
             data_path="data/llava_data/RefCOCOJson/train.json",
             image_folder="data/llava_data/llava_images",
             tokenizer=tokenizer,
@@ -120,7 +81,7 @@ class TestRefCOCOJson(TestCase):
                 "openai/clip-vit-large-patch14-336"
             ),
             max_dataset_length=None,
-            dataset_map_fn=refcoco_json_map_fn,
+            dataset_map_fn=llava_map_fn,
             template_map_fn=dict(
                 type=template_map_fn_factory, template=PROMPT_TEMPLATE.vicuna
             ),
