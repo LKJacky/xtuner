@@ -140,13 +140,6 @@ class RefCOCOJsonDataset(LLaVADataset):
         dataset="refcoco",
         splitBy="unc",
     ):
-        def normalize_bbox(bbox, height, width):
-            x, y, w, h = bbox
-
-            bbox = [x / width, y / height, (x + w) / width, (y + h) / height]
-            bbox = [int(x * 100) for x in bbox]
-            return bbox
-
         refer = REFER(ann_path, image_path, dataset, splitBy)
         ref_ids = refer.getRefIds(split="train")
 
@@ -161,7 +154,7 @@ class RefCOCOJsonDataset(LLaVADataset):
             bbox = refer.getRefBox(ref["ref_id"])
 
             image = Image.open(image_path + "/" + image_id + ".jpg")
-            bbox = normalize_bbox(bbox, image.height, image.width)
+            bbox = cls.normalize_bbox(bbox, image.height, image.width)
 
             for sent in sents:
                 sent_id = "_".join(sent.split(" "))
@@ -179,26 +172,50 @@ class RefCOCOJsonDataset(LLaVADataset):
 
         return list(data.values()), list(duplicate_data.values())
 
+    @classmethod
+    def normalize_bbox(cls, bbox, height, width):
+        x, y, w, h = bbox
+
+        bbox = [x / width, y / height, (x + w) / width, (y + h) / height]
+        bbox = [int(x * 100) for x in bbox]
+        return bbox
+
     def __getitem__(self, index):
         data_dict = self.text_data[index]
-        if data_dict.get('image', None) is not None:
-            image_file = data_dict['image']
-            image = Image.open(os.path.join(self.image_folder,
-                                            image_file)).convert('RGB')
+        if data_dict.get("image", None) is not None:
+            image_file = data_dict["image"]
+            image = Image.open(os.path.join(self.image_folder, image_file)).convert(
+                "RGB"
+            )
             crop_size = self.image_processor.crop_size
-            image = image.resize((crop_size['width'], crop_size['height']))
-            image = self.image_processor.preprocess(
-                image, return_tensors='pt')['pixel_values'][0]
-            data_dict['pixel_values'] = image
+            image = image.resize((crop_size["width"], crop_size["height"]))
+            image = self.image_processor.preprocess(image, return_tensors="pt")[
+                "pixel_values"
+            ][0]
+            data_dict["pixel_values"] = image
         else:
             crop_size = self.image_processor.crop_size
-            data_dict['pixel_values'] = torch.zeros(3, crop_size['height'],
-                                                    crop_size['width'])
+            data_dict["pixel_values"] = torch.zeros(
+                3, crop_size["height"], crop_size["width"]
+            )
         return data_dict
 
 
 class RefCOCOJsonEvalDataset(RefCOCOJsonDataset):
     instruction_pool = ["[refer] give me the location of {}"]
+
+    def reformat_data(self, json_data):
+        for sample in json_data:
+            # reformat bbox
+            sample["bbox"] = self.normalize_bbox(
+                sample["bbox"], sample["height"], sample["width"]
+            )
+            sample.pop("height")
+            sample.pop("width")
+            # reformat img_id
+            sample["img_id"] = sample["img_id"].split("_")[-2]
+            sample["id"] = f"{sample['img_id']}-{sample['sents']}"
+        return super().reformat_data(json_data)
 
 
 class InvRefCOCOJsonDataset(RefCOCOJsonDataset):
