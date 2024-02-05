@@ -55,6 +55,7 @@ class RefCOCOJsonDataset(LLaVADataset):
         template_map_fn=None,
         max_length=2048,
         pad_image_to_square=False,
+        pre_process=True,
     ):
         json_data = json.load(open(data_path))
 
@@ -68,7 +69,6 @@ class RefCOCOJsonDataset(LLaVADataset):
                 json_data[idx]["id"] = str(json_data[idx]["id"])
         json_data = DatasetDict({"train": HFDataset.from_list(json_data)})
 
-        self.text_data = json_data
         self.kwargs_for_hf_processor = dict(
             tokenizer=tokenizer,
             max_length=max_length,
@@ -81,6 +81,12 @@ class RefCOCOJsonDataset(LLaVADataset):
             with_image_token=True,
             map_num_proc=1,
         )
+        if pre_process:
+            self.text_data = process_hf_dataset(
+                json_data, **self.kwargs_for_hf_processor
+            )
+        else:
+            self.text_data = json_data
 
         self.image_folder = image_folder
         if (
@@ -92,6 +98,21 @@ class RefCOCOJsonDataset(LLaVADataset):
         else:
             self.image_processor = image_processor
         self.pad_image_to_square = pad_image_to_square
+        self.pre_process = pre_process
+
+    def __len__(self):
+        if self.pre_process:
+            return super().__len__()
+        else:
+            return len(self.text_data["train"])
+
+    @property
+    def modality_length(self):
+        if self.pre_process:
+            length_list = [300] * len(self)
+            return length_list
+        else:
+            return super().__len__()
 
     def reformat_data(self, json_data):
         new_json_data = []
@@ -183,9 +204,12 @@ class RefCOCOJsonDataset(LLaVADataset):
         return bbox
 
     def __getitem__(self, index):
-        data_dict = self.refcoco_prepare_hf(
-            self.text_data["train"][index], **self.kwargs_for_hf_processor
-        )
+        if self.pre_process:
+            data_dict = self.text_data[0]
+        else:
+            data_dict = self.refcoco_prepare_hf(
+                self.text_data["train"][index], **self.kwargs_for_hf_processor
+            )
 
         if data_dict.get("image", None) is not None:
             image_file = data_dict["image"]

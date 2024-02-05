@@ -49,9 +49,8 @@ __all__ = [
     'crime_kg_assitant_map_fn', 'sql_map_fn', 'openai_map_fn',
     'wizardlm_map_fn', 'stack_exchange_map_fn', 'msagent_react_map_fn',
     'pretrain_map_fn', 'default_map_fn', 'llava_image_only_map_fn',
-    'llava_map_fn', 'DATASET_FORMAT_MAPPING'
-    'pretrain_map_fn', 'default_map_fn', 'llava_pretrain_map_fn',
-    'llava_finetune_map_fn', 'refcoco_map_fn'
+    'llava_map_fn', 'DATASET_FORMAT_MAPPING',
+    'pretrain_map_fn', 'default_map_fn',
     "alpaca_map_fn",
     "alpaca_zh_map_fn",
     "oasst1_map_fn",

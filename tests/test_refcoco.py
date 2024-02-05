@@ -133,6 +133,8 @@ class TestRefCOCOJson(TestCase):
         loader = DataLoader(dataset, batch_size=1)
         self._print(loader.__iter__().__next__())
 
+        print(len(dataset))
+        print(len(loader))
     def test_data_load_inv(self):
         tokenizer = AutoTokenizer.from_pretrained("lmsys/vicuna-7b-v1.5")
         dataset = InvRefCOCOJsonDataset(
