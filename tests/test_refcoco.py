@@ -40,6 +40,7 @@ class TestRefCOCOJson(TestCase):
         data_path="data/llava_data/LLaVA-Instruct-150K/complex_reasoning_77k.json",
         data_type=LLaVADataset,
         tokenizer=None,
+        image_size=336,
     ):
         if tokenizer is None:
             tokenizer = AutoTokenizer.from_pretrained("lmsys/vicuna-7b-v1.5")
@@ -48,7 +49,7 @@ class TestRefCOCOJson(TestCase):
             image_folder="data/llava_data/llava_images",
             tokenizer=tokenizer,
             image_processor=CLIPImageProcessor.from_pretrained(
-                "openai/clip-vit-large-patch14-336"
+                "openai/clip-vit-large-patch14-336", crop_size=[image_size, image_size]
             ),
             max_dataset_length=None,
             dataset_map_fn=llava_map_fn,
@@ -73,23 +74,29 @@ class TestRefCOCOJson(TestCase):
 
     def test_generate(self):
         save = False
-        save_path = "data/llava_data/RefCOCOJson"
-
-        data = RefCOCOJsonDataset.get_data_json(
-            ann_path="data/refcoco/refcoco_annotations",
-            image_path="data/llava_data/llava_images",
-        )[0]
-        print(data[0])
+        save_path = "data/llava_data/RefCOCOJson/"
+        data_info = [
+            ("refcoco", "unc"),
+            ("refcoco+", "unc"),
+            ("refcocog", "umd"),
+        ]
+        all_data = []
+        for data_type, split in data_info:
+            data = RefCOCOJsonDataset.get_data_json(
+                ann_path="data/refcoco/refcoco_annotations",
+                image_path="data/llava_data/llava_images",
+                dataset=data_type,
+                splitBy=split,
+            )[0]
+            all_data.extend(data)
+        print(all_data[0])
+        print(len(all_data))
 
         if save:
             with open(save_path + "/train.json", "w") as f:
-                json.dump(data, f, indent=4)
+                json.dump(all_data, f, indent=4)
 
     def test_llava_dataset(self):
-        dataset = self.load_refcoco_dataset()
-        self._print(dataset[0])
-
-    def test_data_load(self):
         tokenizer = AutoTokenizer.from_pretrained("lmsys/vicuna-7b-v1.5")
         dataset = RefCOCOJsonDataset(
             data_path="data/llava_data/RefCOCOJson/train.json",
@@ -108,22 +115,18 @@ class TestRefCOCOJson(TestCase):
         )
         self._print(dataset[0])
 
+    def test_data_load(self):
+        dataset = self.load_refcoco_dataset(
+            data_path="data/llava_data/RefCOCOJson/train.json",
+            data_type=RefCOCOJsonDataset,
+        )
+        self._print(dataset[0])
+        print(len(dataset))
+
     def test_data_load_eval(self):
-        tokenizer = AutoTokenizer.from_pretrained("lmsys/vicuna-7b-v1.5")
-        dataset = RefCOCOJsonEvalDataset(
+        dataset = self.load_refcoco_dataset(
             data_path="data/refcoco/refcoco_annotations/eval_data/refcoco_testA.json",
-            image_folder="data/llava_data/llava_images",
-            tokenizer=tokenizer,
-            image_processor=CLIPImageProcessor.from_pretrained(
-                "openai/clip-vit-large-patch14-336"
-            ),
-            max_dataset_length=None,
-            dataset_map_fn=llava_map_fn,
-            template_map_fn=dict(
-                type=template_map_fn_factory, template=PROMPT_TEMPLATE.vicuna
-            ),
-            max_length=2048,
-            pad_image_to_square=False,
+            data_type=RefCOCOJsonEvalDataset,
         )
         self._print(dataset[0])
 

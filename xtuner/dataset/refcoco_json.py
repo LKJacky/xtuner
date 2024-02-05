@@ -67,8 +67,9 @@ class RefCOCOJsonDataset(LLaVADataset):
             if isinstance(json_data[idx]["id"], int):
                 json_data[idx]["id"] = str(json_data[idx]["id"])
         json_data = DatasetDict({"train": HFDataset.from_list(json_data)})
-        self.text_data = process_hf_dataset(
-            dataset=json_data,
+
+        self.text_data = json_data
+        self.kwargs_for_hf_processor = dict(
             tokenizer=tokenizer,
             max_length=max_length,
             dataset_map_fn=dataset_map_fn,
@@ -78,6 +79,7 @@ class RefCOCOJsonDataset(LLaVADataset):
             remove_unused_columns=False,
             pack_to_max_length=False,
             with_image_token=True,
+            map_num_proc=1,
         )
 
         self.image_folder = image_folder
@@ -161,7 +163,7 @@ class RefCOCOJsonDataset(LLaVADataset):
                 data_id = f"{dataset}-{splitBy}-{image_id}-{sent_id}"
                 data_item = {
                     "id": data_id,
-                    "img_id": image_id,
+                    "image": image_id + ".jpg",
                     "sents": sent,
                     "bbox": bbox,
                 }
@@ -181,7 +183,10 @@ class RefCOCOJsonDataset(LLaVADataset):
         return bbox
 
     def __getitem__(self, index):
-        data_dict = self.text_data[index]
+        data_dict = self.refcoco_prepare_hf(
+            self.text_data["train"][index], **self.kwargs_for_hf_processor
+        )
+
         if data_dict.get("image", None) is not None:
             image_file = data_dict["image"]
             image = Image.open(os.path.join(self.image_folder, image_file)).convert(
@@ -200,6 +205,16 @@ class RefCOCOJsonDataset(LLaVADataset):
             )
         return data_dict
 
+    @classmethod
+    def refcoco_prepare_hf(cls, data, **kwargs):
+        json_data = DatasetDict({"train": HFDataset.from_list([data])})
+
+        data_set = process_hf_dataset(
+            dataset=json_data,
+            **kwargs,
+        )
+        return data_set[0]
+
 
 class RefCOCOJsonEvalDataset(RefCOCOJsonDataset):
     instruction_pool = ["[refer] give me the location of {}"]
@@ -213,8 +228,9 @@ class RefCOCOJsonEvalDataset(RefCOCOJsonDataset):
             sample.pop("height")
             sample.pop("width")
             # reformat img_id
-            sample["img_id"] = sample["img_id"].split("_")[-2]
-            sample["id"] = f"{sample['img_id']}-{sample['sents']}"
+            img_id = sample["img_id"].split("_")[-2]
+            sample["image"] = img_id + ".jpg"
+            sample["id"] = f"{img_id}-{sample['sents']}"
         return super().reformat_data(json_data)
 
 
