@@ -79,7 +79,6 @@ class RefCOCOJsonDataset(LLaVADataset):
             remove_unused_columns=False,
             pack_to_max_length=False,
             with_image_token=True,
-            map_num_proc=1,
         )
         if pre_process:
             self.text_data = process_hf_dataset(
@@ -236,6 +235,7 @@ class RefCOCOJsonDataset(LLaVADataset):
         data_set = process_hf_dataset(
             dataset=json_data,
             **kwargs,
+            map_num_proc=1,
         )
         return data_set[0]
 
