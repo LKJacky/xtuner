@@ -135,6 +135,7 @@ class TestRefCOCOJson(TestCase):
 
         print(len(dataset))
         print(len(loader))
+
     def test_data_load_inv(self):
         tokenizer = AutoTokenizer.from_pretrained("lmsys/vicuna-7b-v1.5")
         dataset = InvRefCOCOJsonDataset(
