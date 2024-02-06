@@ -19,6 +19,9 @@ from xtuner.model.llava import LLaVAModel
 from xtuner.model.utils import prepare_inputs_labels_for_multimodal
 from transformers import AutoModelForCausalLM, CLIPVisionModel
 from torch.utils.data import DataLoader
+from xtuner.utils import DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX, PROMPT_TEMPLATE
+
+from torch.cuda.amp import autocast
 
 
 def skip_init():
@@ -170,13 +173,18 @@ class TestModel(TestCase):
 
     @torch.no_grad()
     def test_generation(self):
+        device = torch.device("cuda:0")
         model = LLaVAModel(
-            llm=AutoModelForCausalLM.from_pretrained("lmsys/vicuna-7b-v1.5"),
+            llm=AutoModelForCausalLM.from_pretrained(
+                "lmsys/vicuna-7b-v1.5",
+                torch_dtype=torch.float16,
+            ),
             visual_encoder=CLIPVisionModel.from_pretrained(
-                "openai/clip-vit-large-patch14-336"
+                "openai/clip-vit-large-patch14-336",
+                torch_dtype=torch.float16,
             ),
         )
-        model = model.cpu()
+        model = model.to(device)
 
         dataset = TestRefCOCOJson.load_refcoco_dataset(
             data_path="data/refcoco/refcoco_annotations/eval_data/refcoco_testA.json",
@@ -185,21 +193,45 @@ class TestModel(TestCase):
 
         dataloader = DataLoader(dataset, batch_size=1)
         data = dataloader.__iter__().__next__()
+        tokenizer = AutoTokenizer.from_pretrained("lmsys/vicuna-7b-v1.5")
 
-        visual_outputs = model.visual_encoder(
-            data["pixel_values"].cpu(), output_hidden_states=True
-        )
-        pixel_values = model.projector(
-            visual_outputs.hidden_states[model.visual_select_layer][:, 1:]
-        )
-        data["pixel_values"] = pixel_values
-        data["input_ids"] = torch.tensor(data["input_ids"]).reshape([1, -1])
-        data = prepare_inputs_labels_for_multimodal(
-            llm=model.llm,
-            input_ids=data["input_ids"],
-            pixel_values=data["pixel_values"],
-        )
+        with autocast():
 
-        generation = model.llm.generate(**data)
-        tokenizer = model.llm.tokenizer
+            inputs = data["conversation"][0]["input"][0]
+            chunk_encode = []
+            for idx, chunk in enumerate(inputs.split(DEFAULT_IMAGE_TOKEN)):
+                if idx == 0:
+                    cur_encode = tokenizer.encode(chunk)
+                else:
+                    cur_encode = tokenizer.encode(chunk, add_special_tokens=False)
+                chunk_encode.append(cur_encode)
+            assert len(chunk_encode) == 2
+            ids = []
+            for idx, cur_chunk_encode in enumerate(chunk_encode):
+                ids.extend(cur_chunk_encode)
+                if idx != len(chunk_encode) - 1:
+                    ids.append(IMAGE_TOKEN_INDEX)
+            ids = torch.tensor(ids).cuda().unsqueeze(0)
+
+            visual_outputs = model.visual_encoder(
+                data["pixel_values"].to(device), output_hidden_states=True
+            )
+            pixel_values = model.projector(
+                visual_outputs.hidden_states[model.visual_select_layer][:, 1:]
+            )
+            data["pixel_values"] = pixel_values
+            data["input_ids"] = ids
+            datax = prepare_inputs_labels_for_multimodal(
+                llm=model.llm.to(device),
+                input_ids=data["input_ids"].to(device),
+                pixel_values=data["pixel_values"].to(device),
+            )
+            generation = model.llm.generate(
+                **datax,
+                max_new_tokens=10,
+                do_sample=False,
+                bos_token_id=tokenizer.bos_token_id,
+                eos_token_id=tokenizer.eos_token_id,
+            )
+
         print(tokenizer.decode(generation[0]))
