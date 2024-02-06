@@ -111,7 +111,7 @@ class RefCOCOJsonDataset(LLaVADataset):
             length_list = [300] * len(self)
             return length_list
         else:
-            return super().__len__()
+            return super().modality_length
 
     def reformat_data(self, json_data):
         new_json_data = []
