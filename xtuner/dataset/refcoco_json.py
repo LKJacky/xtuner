@@ -204,7 +204,7 @@ class RefCOCOJsonDataset(LLaVADataset):
 
     def __getitem__(self, index):
         if self.pre_process:
-            data_dict = self.text_data[0]
+            data_dict = self.text_data[index]
         else:
             data_dict = self.refcoco_prepare_hf(
                 self.text_data["train"][index], **self.kwargs_for_hf_processor
