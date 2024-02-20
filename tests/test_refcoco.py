@@ -4,6 +4,7 @@ import json
 from unittest import TestCase
 
 import torch
+import os
 
 
 from xtuner.dataset.refcoco_json import (
@@ -34,6 +35,7 @@ def skip_init():
 
 
 skip_init()
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
 
 class TestRefCOCOJson(TestCase):
@@ -44,6 +46,7 @@ class TestRefCOCOJson(TestCase):
         data_type=LLaVADataset,
         tokenizer=None,
         image_size=336,
+        **kwargs,
     ):
         if tokenizer is None:
             tokenizer = AutoTokenizer.from_pretrained("lmsys/vicuna-7b-v1.5")
@@ -54,13 +57,13 @@ class TestRefCOCOJson(TestCase):
             image_processor=CLIPImageProcessor.from_pretrained(
                 "openai/clip-vit-large-patch14-336", crop_size=[image_size, image_size]
             ),
-            max_dataset_length=None,
             dataset_map_fn=llava_map_fn,
             template_map_fn=dict(
                 type=template_map_fn_factory, template=PROMPT_TEMPLATE.vicuna
             ),
             max_length=2048,
             pad_image_to_square=False,
+            **kwargs,
         )
         return dataset
 
@@ -103,6 +106,7 @@ class TestRefCOCOJson(TestCase):
         dataset = self.load_refcoco_dataset(
             data_path="data/llava_data/LLaVA-Instruct-150K/llava_v1_5_mix665k.json",
             data_type=LLaVADataset,
+            max_dataset_length=2048,
         )
         print(len(dataset))
 
@@ -110,6 +114,7 @@ class TestRefCOCOJson(TestCase):
         dataset = self.load_refcoco_dataset(
             data_path="data/llava_data/RefCOCOJson/train.json",
             data_type=RefCOCOJsonDataset,
+            max_dataset_length=10,
         )
         self._print(dataset[0])
         print(len(dataset))
