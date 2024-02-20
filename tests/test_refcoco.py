@@ -100,23 +100,11 @@ class TestRefCOCOJson(TestCase):
                 json.dump(all_data, f, indent=4)
 
     def test_llava_dataset(self):
-        tokenizer = AutoTokenizer.from_pretrained("lmsys/vicuna-7b-v1.5")
-        dataset = RefCOCOJsonDataset(
-            data_path="data/llava_data/RefCOCOJson/train.json",
-            image_folder="data/llava_data/llava_images",
-            tokenizer=tokenizer,
-            image_processor=CLIPImageProcessor.from_pretrained(
-                "openai/clip-vit-large-patch14-336"
-            ),
-            max_dataset_length=None,
-            dataset_map_fn=llava_map_fn,
-            template_map_fn=dict(
-                type=template_map_fn_factory, template=PROMPT_TEMPLATE.vicuna
-            ),
-            max_length=2048,
-            pad_image_to_square=False,
+        dataset = self.load_refcoco_dataset(
+            data_path="data/llava_data/LLaVA-Instruct-150K/llava_v1_5_mix665k.json",
+            data_type=LLaVADataset,
         )
-        self._print(dataset[0])
+        print(len(dataset))
 
     def test_data_load(self):
         dataset = self.load_refcoco_dataset(
@@ -131,13 +119,20 @@ class TestRefCOCOJson(TestCase):
             data_path="data/refcoco/refcoco_annotations/eval_data/refcoco_testA.json",
             data_type=RefCOCOJsonEvalDataset,
         )
+        import time
+
         self._print(dataset[0])
 
-        loader = DataLoader(dataset, batch_size=1)
-        self._print(loader.__iter__().__next__())
+        for i in range(100):
+            t0 = time.time()
+            a = dataset[i]
+            # self._print(dataset[i])
+            print(time.time() - t0)
+        # loader = DataLoader(dataset, batch_size=1)
+        # self._print(loader.__iter__().__next__())
 
-        print(len(dataset))
-        print(len(loader))
+        # print(len(dataset))
+        # print(len(loader))
 
     def test_data_load_inv(self):
         tokenizer = AutoTokenizer.from_pretrained("lmsys/vicuna-7b-v1.5")
