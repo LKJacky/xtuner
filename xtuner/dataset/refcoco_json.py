@@ -31,6 +31,7 @@ from datasets import Dataset as HFDataset
 from datasets import DatasetDict
 from mmengine.config import Config, ConfigDict
 from ..registry import BUILDER
+from .utils import expand2square
 
 
 class RefCOCOJsonDataset(LLaVADataset):
@@ -210,13 +211,16 @@ class RefCOCOJsonDataset(LLaVADataset):
                 self.text_data["train"][index], **self.kwargs_for_hf_processor
             )
 
+        data_dict = self.text_data[index]
         if data_dict.get("image", None) is not None:
             image_file = data_dict["image"]
             image = Image.open(os.path.join(self.image_folder, image_file)).convert(
                 "RGB"
             )
-            crop_size = self.image_processor.crop_size
-            image = image.resize((crop_size["width"], crop_size["height"]))
+            if self.pad_image_to_square:
+                image = expand2square(
+                    image, tuple(int(x * 255) for x in self.image_processor.image_mean)
+                )
             image = self.image_processor.preprocess(image, return_tensors="pt")[
                 "pixel_values"
             ][0]

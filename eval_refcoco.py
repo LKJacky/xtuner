@@ -72,16 +72,16 @@ def main():
     model: LLaVAModel = BUILDER.build(config.model).to(device)
     tokenizer = AutoTokenizer.from_pretrained("lmsys/vicuna-7b-v1.5")
     state_dict = torch.load(
-        "work_dirs/llava_vicuna_7b_v15_qlora_clip_vit_large_p14_336_lora_e1_gpu8_finetune_refcoco/epoch_1.pth/mp_rank_00_model_states.pt",
+        "work_dirs/llava_vicuna_7b_v15_qlora_clip_vit_large_p14_336_lora_e1_gpu8_finetune_refcoco/iter_3771.pth/mp_rank_00_model_states.pt",
         map_location="cpu",
     )["module"]
-    model.load_state_dict(state_dict, strict=False)
+    error_key = model.load_state_dict(state_dict, strict=False)
     model.eval()
 
     # dataset
     dataset = RefCOCOJsonEvalDataset(
         data_path="data/llava_data/RefCOCOJson/eval_data/refcoco_testA.json",
-        image_folder="data/llava_data/llava_images",
+        image_folder="data/llava_data/llava_images/coco/train2017/",
         tokenizer=tokenizer,
         image_processor=CLIPImageProcessor.from_pretrained(
             "openai/clip-vit-large-patch14-336"
@@ -107,9 +107,11 @@ def main():
         max_new_tokens=100,
         do_sample=False,
         eos_token_id=tokenizer.eos_token_id,
-        pad_token_id=tokenizer.pad_token_id
-        if tokenizer.pad_token_id is not None
-        else tokenizer.eos_token_id,
+        pad_token_id=(
+            tokenizer.pad_token_id
+            if tokenizer.pad_token_id is not None
+            else tokenizer.eos_token_id
+        ),
     )
     stop_criteria = get_stop_criteria(tokenizer=tokenizer, stop_words=["</s>"])
     print(len(dataset))
@@ -165,7 +167,7 @@ def main():
             }
         )
         if i % 100 == 0:
-            print(f"{i}/{len(dataset)}: {time.time()-t0}")
+            print(f"{i}/{len(dataset)}: {time.time()-t0}, {ans}")
     merged_outputs = merge_outputs(answers)
     json.dump(merged_outputs, open("answers.json", "w"))
 

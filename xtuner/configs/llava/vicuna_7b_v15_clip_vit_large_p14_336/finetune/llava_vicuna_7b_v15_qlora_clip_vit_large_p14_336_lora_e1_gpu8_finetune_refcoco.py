@@ -127,17 +127,30 @@ model = dict(
 refcoco_dataset = dict(
     type=RefCOCOJsonDataset,
     data_path="data/llava_data/RefCOCOJson/train.json",
-    image_folder=image_folder,
+    image_folder=image_folder + "/coco/train2017",
     tokenizer=tokenizer,
     image_processor=image_processor,
     dataset_map_fn=llava_map_fn,
     template_map_fn=dict(type=template_map_fn_factory, template=prompt_template),
     max_length=max_length,
     pad_image_to_square=True,
+    max_dataset_length=150000,
 )
 inv_refcoco_dataset = dict(
     type=InvRefCOCOJsonDataset,
     data_path="data/llava_data/RefCOCOJson/train.json",
+    image_folder=image_folder + "/coco/train2017",
+    tokenizer=tokenizer,
+    image_processor=image_processor,
+    dataset_map_fn=llava_map_fn,
+    template_map_fn=dict(type=template_map_fn_factory, template=prompt_template),
+    max_length=max_length,
+    pad_image_to_square=True,
+    max_dataset_length=150000,
+)
+mix_llava_dataset = dict(
+    type=LLaVADataset,
+    data_path=data_path,
     image_folder=image_folder,
     tokenizer=tokenizer,
     image_processor=image_processor,
@@ -147,7 +160,8 @@ inv_refcoco_dataset = dict(
     pad_image_to_square=True,
 )
 llava_dataset = dict(
-    type=ConcatDataset, datasets=[refcoco_dataset, inv_refcoco_dataset]
+    type=ConcatDataset,
+    datasets=[refcoco_dataset, inv_refcoco_dataset, mix_llava_dataset],
 )
 
 
@@ -206,16 +220,17 @@ train_cfg = dict(type=TrainLoop, max_epochs=max_epochs)
 # Log the dialogue periodically during the training process, optional
 custom_hooks = [
     dict(type=DatasetInfoHook, tokenizer=tokenizer),
-    dict(
-        type=EvaluateChatHook,
-        tokenizer=tokenizer,
-        image_processor=image_processor,
-        every_n_iters=evaluation_freq,
-        evaluation_inputs=evaluation_inputs,
-        evaluation_images=evaluation_images,
-        system=SYSTEM,
-        prompt_template=prompt_template,
-    ),
+    # dict(
+    #     type=EvaluateChatHook,
+    #     tokenizer=tokenizer,
+    #     image_processor=image_processor,
+    #     every_n_iters=evaluation_freq,
+    #     evaluation_inputs=evaluation_inputs,
+    #     evaluation_images=evaluation_images,
+    #     system=SYSTEM,
+    #     prompt_template=prompt_template,
+    #     max_new_tokens=20,
+    # ),
 ]
 
 # configure default hooks
