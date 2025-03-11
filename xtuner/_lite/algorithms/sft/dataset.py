@@ -4,11 +4,13 @@ from torch.nn.utils.rnn import pad_sequence
 
 from xtuner._lite import get_logger
 from xtuner._lite.datasets import OPENAI_CONVERT_MAP
+import hashlib
+from xtuner._lite.datasets.jsonl import CachableTokenizeFunction
 
 logger = get_logger()
 
 
-class SftTokenizeFunction:
+class SftTokenizeFunction(CachableTokenizeFunction):
     def __init__(self, tokenizer, chat_template, raw_format="openai"):
         self.tokenizer = tokenizer
         self.chat_template = chat_template
@@ -19,6 +21,19 @@ class SftTokenizeFunction:
         msg = formatter(item)
         tokenized = msg.tokenize(self.tokenizer, self.chat_template)
         return tokenized
+
+    def hash(self) -> str:
+
+        vocab = self.tokenizer.get_vocab()
+        vocab = [(v, k) for k, v in vocab.items()]
+        vocab = sorted(vocab, key=lambda x: x[0])
+
+        chat_template = self.chat_template
+        chat_template = f"system:{chat_template.system},user:{chat_template.user},assistant:{chat_template.assistant},stop_words:{chat_template.stop_words}"
+
+        hash_tuple = str(tuple([*vocab, chat_template]))
+        hash_value = hashlib.md5(hash_tuple.encode()).hexdigest()
+        return str(hash_value)
 
 
 class SftCollator:
