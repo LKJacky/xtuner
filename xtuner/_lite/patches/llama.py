@@ -875,7 +875,7 @@ class CUDAPatchedLlamaForCausalLM(PatchedCausalLM, GenerateMixin):
         return outputs
 
     @staticmethod
-    @torch.compile(fullgraph=True)
+    # @torch.compile(fullgraph=True)
     def patched_layer_forward_decoding(
         self,
         hidden_states: torch.Tensor,
