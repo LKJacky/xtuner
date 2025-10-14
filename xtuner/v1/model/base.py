@@ -49,6 +49,7 @@ class TransformerConfig(PydanticBaseModel):
     model_config = ConfigDict(
         title="Base model config for xtuner",
         extra="allow",
+        protected_namespaces=(),
     )
     vocab_size: Annotated[int, Parameter(group="model")]
     max_position_embeddings: Annotated[int, Parameter(group="model")]
@@ -59,7 +60,6 @@ class TransformerConfig(PydanticBaseModel):
     intermediate_size: Annotated[int, Parameter(group="model")]
     rms_norm_eps: Annotated[float, Parameter(group="model")]
     rope_theta: Annotated[float, Parameter(group="model")]  # required by transformers's build rope
-    rope_scaling: Annotated[dict | None, Parameter(group="model")] = None
     hidden_act: Annotated[str, Parameter(group="model")]  # key defined in `transformers.activations.ACT2CLS`
     attention: MLAConfig | MHAConfig
     mlp_bias: Annotated[bool, Parameter(group="model")] = False
@@ -1080,7 +1080,7 @@ class BaseModel(nn.Module):
     def _maybe_compile_layers(self):
         if self.fsdp_config is not None:
             if self.fsdp_config.torch_compile:
-                torch._dynamo.config.cache_size_limit = 128
+                torch._dynamo.config.cache_size_limit = 256
                 if self.fsdp_config.compile_targets is not None:
                     maybe_compile.clear_compile_targets()
                     for target in self.fsdp_config.compile_targets:

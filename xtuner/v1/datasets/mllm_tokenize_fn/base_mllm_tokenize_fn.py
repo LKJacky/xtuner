@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import os
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 
 import xxhash
 from PIL import Image
@@ -46,7 +46,12 @@ def collect_image_video_paths_and_extra(messages: list[dict]):
     return image_paths, video_paths, {"image_wh": image_wh_list}
 
 
-def replace_image_token(messages: ChatMessages, chat_template: HybridChatTemplate, num_image_token_list: list[int]):
+def replace_image_token(
+    messages: ChatMessages,
+    chat_template: HybridChatTemplate,
+    num_image_token_list: list[int],
+    add_vision_id: bool = False,
+):
     current_image_idx = 0
     for msg in messages.messages:
         if msg.role == "user":
@@ -58,19 +63,21 @@ def replace_image_token(messages: ChatMessages, chat_template: HybridChatTemplat
                         assert "<IMG_CONTEXT>" in text
                         text = text.replace("<IMG_CONTEXT>", IMAGE_TOKEN_ALIAS)
                         image_cnt = text.count(IMAGE_TOKEN_ALIAS)
-                        for _ in range(image_cnt):
+                        for i in range(image_cnt):
                             image_tokens = f"{chat_template.image_start_token}{chat_template.image_context_token * num_image_token_list[current_image_idx]}{chat_template.image_end_token}"  # type: ignore
+                            if add_vision_id and image_cnt > 1:
+                                # add vision id for each image when there are multiple images
+                                image_tokens = f"Picture {i + 1}: " + image_tokens
                             text = text.replace(IMAGE_TOKEN_ALIAS, image_tokens, 1)
                             current_image_idx += 1
                         c.text = text
-        # if current_image_idx < num_image, it means <image> placeholder is less than num_image
-        assert current_image_idx == len(num_image_token_list), (
-            f"ERROR: current_image_idx: {current_image_idx} != num_image: {len(num_image_token_list)}"
-        )
+    # if current_image_idx < num_image, it means <image> placeholder is less than num_image
+    assert current_image_idx == len(num_image_token_list), (
+        f"ERROR: current_image_idx: {current_image_idx} != num_image: {len(num_image_token_list)}"
+    )
 
 
 def load_image(image_path: str):
-    # Load the image using tcs_loader if available, otherwise use PIL
     return Image.open(image_path).convert("RGB")
 
 
@@ -176,7 +183,11 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
 
 
 class BaseMLLMTokenizeFnConfig(BaseModel):
-    model_config = ConfigDict(title="Base dataset config for xtuner", extra="allow")
+    model_config = ConfigDict(
+        title="Base dataset config for xtuner",
+        extra="allow",
+        protected_namespaces=(),
+    )
     system_message: str | None = None
     max_length: int | None = None
     hash: str | None = None
@@ -185,3 +196,8 @@ class BaseMLLMTokenizeFnConfig(BaseModel):
         self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs
     ) -> BaseMLLMTokenizeFunction:
         raise NotImplementedError("The 'build' method must be implemented.")
+
+
+class OSSLoaderConfig(BaseModel):
+    backend: Literal["petrel"] = "petrel"
+    backend_kwargs: dict = {}

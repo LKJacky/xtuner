@@ -7,10 +7,12 @@ from xtuner.v1.config import GenerateConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.config import Float8Config
 from xtuner.v1.module import MHAConfig, MLAConfig, RMSNorm
+from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops.act_fn import get_act_fn
 from xtuner.v1.utils import ForwardState
+from xtuner.v1.utils.compile import maybe_compile
 
-from ..linear.linear import _Linear
+from ..linear.linear import build_linear
 
 
 class DenseMLP(nn.Module):
@@ -21,11 +23,12 @@ class DenseMLP(nn.Module):
         intermediate_size: int,
         bias: bool = False,
         hidden_act: str,
+        float8_cfg: Float8Config | None = None,
     ):
         super().__init__()
-        self.gate_proj = _Linear(hidden_size, intermediate_size, bias=bias)
-        self.up_proj = _Linear(hidden_size, intermediate_size, bias=bias)
-        self.down_proj = _Linear(intermediate_size, hidden_size, bias=bias)
+        self.gate_proj = build_linear(hidden_size, intermediate_size, bias=bias, float8_cfg=float8_cfg)
+        self.up_proj = build_linear(hidden_size, intermediate_size, bias=bias, float8_cfg=float8_cfg)
+        self.down_proj = build_linear(intermediate_size, hidden_size, bias=bias, float8_cfg=float8_cfg)
         self.act_fn = get_act_fn(hidden_act)
 
     def forward(self, x):
@@ -43,7 +46,7 @@ class DenseDecoderLayer(nn.Module):
         hidden_act: str,
         rms_norm_eps: float = 1e-6,
         attention_config: MLAConfig | MHAConfig,
-        rope_scaling_cfg: dict | None = None,
+        rope_scaling_cfg: RopeScalingConfig | None = None,
         generate_config: GenerateConfig | None = None,
         float8_cfg: Float8Config | None = None,
         layer_type: Literal["full_attention", "sliding_attention"] | None = None,
@@ -55,7 +58,7 @@ class DenseDecoderLayer(nn.Module):
             hidden_size=hidden_size,
             layer_type=layer_type,
             layer_idx=layer_idx,
-            rope_scaling=rope_scaling_cfg,
+            rope_scaling_cfg=rope_scaling_cfg,
             generate_config=generate_config,
             float8_cfg=float8_cfg,
         )
@@ -64,10 +67,12 @@ class DenseDecoderLayer(nn.Module):
             intermediate_size=intermediate_size,
             bias=mlp_bias,
             hidden_act=hidden_act,
+            float8_cfg=float8_cfg,
         )
         self.input_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
 
+    @maybe_compile(fullgraph=True)
     def forward(
         self,
         hidden_states: torch.Tensor,
