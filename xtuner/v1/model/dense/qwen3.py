@@ -9,6 +9,8 @@ from xtuner.v1.model.base import TransformerConfig
 from xtuner.v1.module.attention import MHAConfig
 
 from .dense import Dense
+from pydantic import computed_field
+from typing import Literal
 
 
 class Qwen3Dense(Dense):
@@ -31,6 +33,7 @@ class Qwen3Dense(Dense):
 class Qwen3DenseConfig(TransformerConfig):
     use_sliding_window: bool = False
     bos_token_id: int
+    saved_layer_types: list[str] = []
 
     def build(self) -> Qwen3Dense:
         return Qwen3Dense(self)
@@ -66,6 +69,7 @@ class Qwen3DenseConfig(TransformerConfig):
             ),
             use_sliding_window=hf_config.use_sliding_window,
             tie_word_embeddings=hf_config.tie_word_embeddings,
+            saved_layer_types=hf_config.layer_types,
         )
 
         return config
@@ -95,6 +99,10 @@ class Qwen3DenseConfig(TransformerConfig):
             tie_word_embeddings=self.tie_word_embeddings,
             dtype=torch.bfloat16,
         )
+
+    @computed_field
+    def layers_type(self) -> list[Literal["full_attention", "sliding_attention"]]:
+        return self.saved_layer_types
 
 
 # TODO: Unify the config name style
