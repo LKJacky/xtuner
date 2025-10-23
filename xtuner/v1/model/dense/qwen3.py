@@ -98,6 +98,7 @@ class Qwen3DenseConfig(TransformerConfig):
             use_sliding_window=self.use_sliding_window,
             tie_word_embeddings=self.tie_word_embeddings,
             dtype=torch.bfloat16,
+            layer_types=self.layers_type,
         )
 
     @computed_field
