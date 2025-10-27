@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 from typing import Callable, List, Optional, Union
 
 import ray
@@ -60,6 +61,14 @@ class EvaluatorConfig(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
+    enable_evaluate: Annotated[
+        bool,
+        Parameter(help="Flag to enable or disable evaluation during training."),
+    ] = False
+    enable_initial_evaluate: Annotated[
+        bool,
+        Parameter(help="Flag to enable or disable initial evaluation before training starts."),
+    ] = False
     dataset_cfg: Annotated[
         DatasetConfigList,
         Parameter(help="Configuration for the dataset."),
@@ -71,7 +80,7 @@ class EvaluatorConfig(BaseModel):
     max_concurrent: Annotated[
         int,
         Parameter(help="Maximum number of concurrent tasks."),
-    ] = 8
+    ] = 512
     eval_sample_ratio: Annotated[
         float,
         Parameter(help="Ratio of samples to evaluate from the generated samples."),
@@ -90,6 +99,7 @@ class EvaluatorConfig(BaseModel):
         SampleParams,
         Parameter(help="Sampling parameters for evaluation."),
     ] = SampleParams()
+    worker_log_dir: Annotated[Path, Parameter(help="Directory to save worker logs.")] = Path.cwd() / "work_dir"
 
 
 @ray.remote
@@ -132,7 +142,7 @@ class Evaluator:
             self.compute_metric = self.config.compute_metric_func
         else:
             self.compute_metric = self.default_compute_metric
-        self.logger = get_logger()
+        self.logger = get_logger(log_dir=config.worker_log_dir, tag="Evaluator")
 
     def default_compute_metric(self, samples):
         """Default metric computation function.
@@ -225,7 +235,7 @@ class Evaluator:
             pbar.refresh()
 
         self.logger.info(
-            f"Target batch size reached, but {self.failed_samples_count} samples failed and were skipped. Pausing rollout controller."
+            f"Target batch size reached, and {self.failed_samples_count} samples failed and were skipped. Pausing rollout controller."
         )
         ray.get(self.env_controller.pause.remote())
 

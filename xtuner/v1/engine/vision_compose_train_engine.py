@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from torch.distributed.device_mesh import DeviceMesh
 from typing_extensions import Self
 
+from transformers import AutoProcessor
 from transformers.configuration_utils import PretrainedConfig
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.data_proto import SequenceContext
@@ -15,6 +16,7 @@ from xtuner.v1.loss import BaseLossContext
 from xtuner.v1.model.base import BaseModel as XTunerBaseModel
 from xtuner.v1.model.base import ModelItem, ModelOutputs, TransformerConfig
 from xtuner.v1.model.moe.moe import MoEModelOutputs
+from xtuner.v1.model.utils import ModelForwardExtraLogInfo
 from xtuner.v1.module.router import NoAuxRouterConfig
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module
 
@@ -73,6 +75,7 @@ class VisionComposeTrainEngine(TrainEngine):
         *args,
         **kwargs,
     ) -> None:
+        self._processor = None  # only for save
         super().__init__(model_cfg, *args, **kwargs)  # type: ignore
 
     def build_model(self) -> VisionComposeModelProtocol:  # type: ignore
@@ -126,6 +129,15 @@ class VisionComposeTrainEngine(TrainEngine):
             )
         return model
 
+    def from_hf(self, hf_path: str | Path, strict: bool = False):
+        super().from_hf(hf_path, strict)
+        self._processor = AutoProcessor.from_pretrained(hf_path, trust_remote_code=True)
+
+    def save_hf(self, hf_dir: str, save_dtype: torch.dtype = torch.bfloat16):
+        super().save_hf(hf_dir, save_dtype)
+        if self._processor is not None:
+            self._processor.save_pretrained(hf_dir)
+
     def train_step(self, data_batches: List[ModelItem]):
         """Perform a training step with the given data batches and mesh.
 
@@ -164,6 +176,7 @@ class VisionComposeTrainEngine(TrainEngine):
         step_z_loss: torch.Tensor | None = None
         step_consumed_tokens = torch.tensor(0.0, device=DEVICE)
 
+        train_engine_extra_info = ModelForwardExtraLogInfo()
         for i in range(0, len(data_batches), intra_layer_micro_batch):
             data_batch = data_batches[i : i + intra_layer_micro_batch]
             seq_ctx_list = []
@@ -182,6 +195,9 @@ class VisionComposeTrainEngine(TrainEngine):
             step_llm_loss += llm_loss.detach().clone()
 
             loss = llm_loss
+            if "extra_info" in output:
+                train_engine_extra_info.append(output["extra_info"])
+
             if "balancing_loss" in output:
                 output = cast(MoEModelOutputs, output)
                 loss = loss + output["balancing_loss"] / iters_per_step
@@ -226,4 +242,5 @@ class VisionComposeTrainEngine(TrainEngine):
             dist.all_reduce(reduced_z_loss.div_(dist.get_world_size()))
             loss_log["reduced_z_loss"] = reduced_z_loss.item()
         other_log["consumed_tokens"] = step_consumed_tokens.item()
+        other_log["extra_info"] = train_engine_extra_info  # type: ignore[assignment]
         return loss_log, other_log

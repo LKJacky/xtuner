@@ -33,8 +33,8 @@ class TestInternS1(DeterministicDDPTestCase):
     )
     def test_interns1_text_run(self, device, tol):
         self.create_pg(device)
-        if not compile:
-            maybe_compile.clear_compile_targets()
+
+        maybe_compile.clear_compile_targets()
 
         hf_config = AutoConfig.from_pretrained(
             INTERNS1_DENSE_PATH,

@@ -38,6 +38,8 @@ from xtuner.v1.utils.compile import maybe_compile
 from xtuner.v1.utils.load_spec import LoadEnum, LoadSpec
 from xtuner.v1.utils.loader import HFCheckpointLoader
 
+from .utils import ModelForwardExtraLogInfo
+
 
 logger = get_logger()
 
@@ -139,6 +141,7 @@ class ModelOutputs(TypedDict):
     hidden_states: NotRequired[list[torch.Tensor]]
     logits: NotRequired[torch.Tensor]
     loss: torch.Tensor
+    extra_info: ModelForwardExtraLogInfo
 
 
 def _is_float8_available():
@@ -660,7 +663,6 @@ class BaseModel(nn.Module):
         assert save_dtype in [torch.float8_e4m3fn, torch.bfloat16], f"save_dtype {save_dtype} is not supported"
 
         # TODO: Support fp8 saving
-
         shard_gen = self._get_shard_hf_param(self._group_param_by_load_spec(LoadEnum.SHARD), dtype=save_dtype)
         same_gen = self._get_same_hf_param(self._group_param_by_load_spec(LoadEnum.SAME), dtype=save_dtype)
         fused_gen = self._get_fused_hf_param(self._group_param_by_load_spec(LoadEnum.FUSED), dtype=save_dtype)

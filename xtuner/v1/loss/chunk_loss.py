@@ -25,11 +25,14 @@ class ChunkLoss(torch.autograd.Function):
         grad_inputs_chunks = torch.split(grad_inputs, chunk_size, dim=1)
         hidden_states_chunks = torch.split(hidden_states, chunk_size, dim=1)
 
+        from xtuner.v1.model.utils import ModelForwardExtraLogInfo
+
+        chunked_extra_info = ModelForwardExtraLogInfo()
         for i in range(len(hidden_states_chunks)):
             hidden_states_chunk = hidden_states_chunks[i]
             grad_inputs_chunk = grad_inputs_chunks[i]
 
-            (chunk_grad_input, chunk_grad_weight), (chunk_loss, _) = torch.func.grad_and_value(
+            (chunk_grad_input, chunk_grad_weight), (chunk_loss, (_, extra_info)) = torch.func.grad_and_value(
                 loss_forward, argnums=(0, 1), has_aux=True
             )(hidden_states_chunk, head_weight, None, loss_kwargs_chunks[i])
 
@@ -37,8 +40,10 @@ class ChunkLoss(torch.autograd.Function):
             grad_inputs_chunk.copy_(chunk_grad_input)
             grad_weight.add_(chunk_grad_weight)
 
+            chunked_extra_info.append(extra_info)
+
         ctx.save_for_backward(grad_inputs, grad_weight)
-        return accumulated_loss
+        return accumulated_loss, chunked_extra_info
 
     @staticmethod
     def backward(ctx, *grad_output):
