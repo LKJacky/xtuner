@@ -415,6 +415,7 @@ class RLTrainer:
         """Formats and logs the data statistics dictionary."""
         log_lines = [f"Rollout {rollout_idx} data statistics:"]
         for key, value in data_info.items():
+            self.tb_writer.add_scalar(f"{key}", value, self.cur_step)
             if isinstance(value, float):
                 log_lines.append(f"  - {key:<20}: {value:.4f}")
             else:
@@ -639,6 +640,9 @@ class RLTrainer:
     def _init_logger(self, work_dir: Path):
         # Logging system maybe need better design
         logger = get_logger(log_dir=work_dir, tag="RLTrainer")
+        from torch.utils.tensorboard import SummaryWriter
+
+        self.tb_writer = SummaryWriter(log_dir=work_dir)
         return logger
 
     def _set_deterministic(self):
