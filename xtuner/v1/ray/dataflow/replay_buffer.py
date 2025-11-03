@@ -440,7 +440,11 @@ class ReplayBuffer:
             config (ReplayBufferConfig): The configuration object.
         """
         self.storage = ReplayBufferStorage(config.worker_log_dir)
-        self.tokenizer = config.tokenizer
+        self.tokenizer = (
+            AutoTokenizer.from_pretrained(config.tokenizer, trust_remote_code=True)
+            if isinstance(config.tokenizer, str)
+            else config.tokenizer
+        )
         self.datasets = build_datasets(config.dataset_cfg, self.tokenizer)
 
         if config.dataloader_cfg is not None:
