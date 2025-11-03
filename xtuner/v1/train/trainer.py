@@ -804,7 +804,10 @@ class Trainer:
         if self._checkpoint_maxkeep > 0 and len(current_exp.checkpoint_list) > self._checkpoint_maxkeep:
             ckpt_to_remove = current_exp.checkpoint_list.pop(0)
             if self.rank == 0:
-                rmtree(ckpt_to_remove)
+                try:
+                    rmtree(ckpt_to_remove)
+                except Exception as e:
+                    logger.warning(f"Failed to remove checkpoint {ckpt_to_remove}: {e}")
 
         dist.barrier()
 
