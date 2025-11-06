@@ -36,9 +36,14 @@ def get_policy_loss_fn(name):
 
                 package_name, module_name = loss_name.rsplit(".", 1)
                 module = importlib.import_module(package_name)
-                return getattr(module, module_name)
+                loss_fn = getattr(module, module_name)
+                POLICY_LOSS_REGISTRY[loss_name] = loss_fn
+                return loss_fn
             except ImportError as e:
                 raise ImportError(f"Failed to import loss function: {loss_name}, error: {e}")
+        raise ValueError(
+            f"Unsupported loss mode: {loss_name}. Supported modes are: {list(POLICY_LOSS_REGISTRY.keys())}"
+        )
     return POLICY_LOSS_REGISTRY[loss_name]
 
 
