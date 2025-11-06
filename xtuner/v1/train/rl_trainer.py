@@ -361,6 +361,7 @@ class RLTrainer:
             trajectory_save_path = self.exp_dir / "eval_0_trajectory.jsonl"
             self._save_trajectories(eval_data_groups, trajectory_save_path)
             self.logger.info(f"Initial rollout evaluate scores {scores} and start training")
+            self.tb_writer.add_scalar("eval", scores["accuracy"], 0)
         for rollout_idx in range(1, self._rollout_steps + 1):
             timer_log_str = f"Rollout {rollout_idx} start \n"
             step_timer_dict = {}
@@ -412,6 +413,7 @@ class RLTrainer:
                 trajectory_save_path = self.exp_dir / f"eval_{rollout_idx}_trajectory.jsonl"
                 self._save_trajectories(eval_data_groups, trajectory_save_path)
                 self.logger.info(f"Evaluate idx {rollout_idx} scores {scores}")
+                self.tb_writer.add_scalar("eval", scores["accuracy"], rollout_idx)
             self._cur_step += 1
 
     def _log_data_info(self, rollout_idx: int, data_info: dict):
