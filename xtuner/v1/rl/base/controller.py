@@ -233,3 +233,13 @@ class TrainingController:
         handles = [worker.save_hf.remote(hf_dir, save_dtype) for worker in self.workers]  # type: ignore
         ray.get(handles)
         return
+
+    def save_dcp(self, ckpt_dir: str):
+        handles = [worker.save_dcp.remote(ckpt_dir) for worker in self.workers]  # type: ignore
+        ray.get(handles)
+        return
+
+    def load_dcp(self, ckpt_dir: str):
+        handles = [worker.load_dcp.remote(ckpt_dir) for worker in self.workers]  # type: ignore
+        ray.get(handles)
+        return

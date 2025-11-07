@@ -426,6 +426,9 @@ class TrainEngine:
         model_dir: Path,
         optimizer_dir: Path | None = None,
     ):
+        model_dir = Path(model_dir)
+        if optimizer_dir is not None:
+            optimizer_dir = Path(optimizer_dir)
         rank = dist.get_rank()
 
         if rank == 0:

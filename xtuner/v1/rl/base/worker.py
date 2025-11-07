@@ -551,6 +551,12 @@ class TrainingWorker(SingleAcceleratorWorker):
         DEVICE_MODULE.empty_cache()
         return
 
+    def save_dcp(self, ckpt_dir: str):
+        self._engine.save_dcp(ckpt_dir + "/model", optimizer_dir=ckpt_dir + "/optimizer")
+
+    def load_dcp(self, ckpt_dir: str):
+        self._engine.load_dcp(Path(ckpt_dir + "/model"), optimizer_dir=Path(ckpt_dir + "/optimizer"))
+
     # def update_weights1(self):
     #     """Update the model weights."""
     #     self.endpoints["update_weights"] = "update_weights"
