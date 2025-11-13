@@ -251,11 +251,11 @@ class RolloutConfig(BaseModel):
         # In Xtuner, It is derived from `max_concurrent` in `DataflowConfig`. `max_concurrent` represents the concurrency level for group data batch.
         # The total data received by all inference workers is `max_concurrent * prompt_repeat_k`.
         # This is then divided by the number of inference engines (i.e., workers with TP_RANK=0) to determine the max batch size per engine.
-        kwargs["rollout_max_batch_size"] = (
-            kwargs.get("rollout_max_batch_size", 512)
-            * kwargs.get("prompt_repeat_k", 1)
-            / (int(os.environ.get("NODE_COUNT", 1)) * kwargs["gpus_per_node"] / kwargs.get("tensor_parallel_size", 1))
-        )
+        # kwargs["rollout_max_batch_size"] = (
+        #     kwargs.get("rollout_max_batch_size", 512)
+        #     * kwargs.get("prompt_repeat_k", 1)
+        #     / (int(os.environ.get("NODE_COUNT", 1)) * kwargs["gpus_per_node"] / kwargs.get("tensor_parallel_size", 1))
+        # )
         super().__init__(**kwargs)
         self.worker_log_dir.mkdir(parents=True, exist_ok=True)
 
