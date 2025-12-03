@@ -109,9 +109,9 @@ def get_train_seq_ctx(
             )
             position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
             seq_ctx.position_ids = position_ids  # type: ignore[assignment]
+            assert position_ids.size(-1) == input_ids.size(-1)
         seq_ctx.pixel_values = multimodal_train_info.get("pixel_values")
         seq_ctx.image_grid_thw = multimodal_train_info.get("image_grid_thw")
-        seq_ctx.image_flags = multimodal_train_info.get("image_flags")
     return seq_ctx
 
 
@@ -385,6 +385,7 @@ class RLTrainer:
         """
         self.logger.info("Start RL training")
         if self._enable_initial_evaluate and self._enable_evaluate and self._evaluator:
+            ray.get(self._rollout_env_controller.check_active_workers.remote())
             scores, eval_data_groups = ray.get(self._evaluator.run.remote(return_samples=True))
             trajectory_save_path = self.exp_dir / "eval_0_trajectory.jsonl"
             self._save_trajectories(eval_data_groups, trajectory_save_path)
@@ -395,6 +396,7 @@ class RLTrainer:
             step_timer_dict = {}
             # 1. Rollout
             with timer("generation", step_timer_dict):
+                ray.get(self._rollout_env_controller.check_active_workers.remote())
                 data_groups, multimodal_train_infos = ray.get(self._rollout_dataflow.run.remote())
             # 2. Offload rollout models and save trajectories
             with timer("offload_and_dump", step_timer_dict):
@@ -425,6 +427,9 @@ class RLTrainer:
             with timer("saving and sync_weight", step_timer_dict):
                 ray.get(self._train_controller.offload.remote(target="optimizer"))
                 self._maybe_save_hf()
+                bind_train_rollout(
+                    train_controller=self._train_controller, env_controller=self._rollout_env_controller
+                )
                 ray.get(self._rollout_env_controller.onload_weights.remote())
                 ray.get(self._train_controller.update_weights.remote())
                 self.logger.info("Model weights synchronized successfully.")
@@ -498,16 +503,17 @@ class RLTrainer:
                     logprobs = group[i].env.rollout.logprobs
                     assert len(logprobs) == len(response_ids), f"{len(logprobs)} vs {len(response_ids)}"
                     # 只有 response 部分有 logprobs, 需要前面追加
-                    logprobs = [0] * (len(prompt_ids) - 1) + logprobs + [0]
+                    logprobs = [0] * (len(prompt_ids) - 1) + logprobs
                 else:
                     response_ids = self.tokenizer(item, return_tensors="pt")["input_ids"].flatten().tolist()
-                input_ids = prompt_ids + response_ids
+                # 返回的 routed_experts 不包括 eos 的值，实际上也不需要，需要减一
+                input_ids = prompt_ids + response_ids[:-1]
 
                 prompt_len_list.append(len(prompt_ids))
                 response_len_list.append(len(response_ids))
                 advantages_list.extend([advantages[i]] * len(response_ids))
 
-                shifted_labels = [-100] * (len(prompt_ids) - 1) + response_ids + [-100]
+                shifted_labels = [-100] * (len(prompt_ids) - 1) + response_ids
                 assert len(input_ids) <= pack_max_length, f"{len(input_ids)} vs {pack_max_length}"
                 input_ids = torch.tensor(input_ids, dtype=torch.int64).unsqueeze(0)
                 shifted_labels = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
@@ -520,15 +526,19 @@ class RLTrainer:
                 else:
                     rollout_logprobs = None
 
-                seq_ctx = get_train_seq_ctx(input_ids, multimodal_train_info, len(response_ids))
-                data_batches.append(
-                    dict(
-                        seq_ctx=seq_ctx,
-                        shifted_labels=shifted_labels,
-                        advantage=advantages[i].item(),
-                        rollout_logprobs=rollout_logprobs,
-                    )
-                )
+                seq_ctx = get_train_seq_ctx(input_ids, multimodal_train_info, len(response_ids) - 1)
+                data_dict = {
+                    "seq_ctx": seq_ctx,
+                    "shifted_labels": shifted_labels,
+                    "advantage": advantages[i].item(),
+                    "rollout_logprobs": rollout_logprobs,
+                }
+
+                if "routed_experts" in group[i].env.rollout.extra_info:
+                    routed_experts = group[i].env.rollout.extra_info["routed_experts"]  # n,layer*expert
+                    seq_ctx.rollout_routed_experts = routed_experts  # n,layer,expert
+
+                data_batches.append(data_dict)
         random.shuffle(data_batches)
 
         advantages_list = np.array(advantages_list)
@@ -749,11 +759,7 @@ class RLTrainer:
                 timestamp=timestamp,
                 git_info=git_info,
             )
-            new_exp = ExpInfo(
-                history=[new_history],
-                exp_dir=str(exp_dir),
-                latest_checkpoint=None,
-            )
+            new_exp = ExpInfo(history=[new_history], exp_dir=str(exp_dir))
             meta.exps.append(new_exp)
         return meta
 

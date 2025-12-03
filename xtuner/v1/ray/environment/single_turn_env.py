@@ -1,5 +1,6 @@
 import asyncio
 import os
+from pathlib import Path
 from typing import List
 
 import ray
@@ -7,6 +8,7 @@ import ray
 from xtuner.v1.data_proto.rl_data import (
     RLDataFlowItem,
     RLJudgerResponseItem,
+    RLRolloutResponseItem,
     update_dataflow_item,
 )
 from xtuner.v1.ray.environment.base_env import BaseEnvironment
@@ -28,12 +30,34 @@ class SingleTurnEnvironment(BaseEnvironment):
         judger_pg (Any): The placement group for scheduling judger Ray actors.
                          Defaults to None indicates using the rollout_pg.
         judger_cfg (optional): Configuration for the judger controller. Defaults to None.
+        rollout_controller (optional): An instance of the rollout controller. Defaults to None.
+        judger_controller (optional): An instance of the judger controller. Defaults to None.
     """
 
-    def __init__(self, environment: str, rollout_pg, rollout_cfg=None, judger_pg=None, judger_cfg=None):
-        super().__init__(environment, rollout_pg, rollout_cfg, judger_pg, judger_cfg)
-        worker_log_dir = rollout_cfg.worker_log_dir if rollout_cfg else judger_cfg.worker_log_dir
+    def __init__(
+        self,
+        environment: str,
+        rollout_pg,
+        rollout_cfg=None,
+        judger_pg=None,
+        judger_cfg=None,
+        rollout_controller=None,
+        judger_controller=None,
+    ):
+        super().__init__(
+            environment, rollout_pg, rollout_cfg, judger_pg, judger_cfg, rollout_controller, judger_controller
+        )
+        if rollout_cfg:
+            worker_log_dir = rollout_cfg.worker_log_dir
+        elif judger_cfg:
+            worker_log_dir = judger_cfg.worker_log_dir
+        else:
+            worker_log_dir = Path.cwd() / "work_dir"
         self.logger = get_logger(log_dir=worker_log_dir, tag="SingleTurnEnv")
+        if rollout_cfg and rollout_cfg.enable_return_routed_experts:
+            self.logger.info("！！！ Enable `return routed experts` in rollout controller. ！！！")
+        self.rollout_timeout = rollout_cfg.rollout_timeout if rollout_cfg else 1200.0
+        self.judger_timeout = judger_cfg.judger_timeout if judger_cfg else 1200.0
 
     async def generate(
         self, group_data_items: List[RLDataFlowItem], sample_params=None, extra_params=None
@@ -57,19 +81,30 @@ class SingleTurnEnvironment(BaseEnvironment):
                 and state from the rollout controller.
         """
         if self.rollout_controller:
-            # 在env中对输入的数据进行转换，是为了支持rollout_controller单独作为rollout engine使用，使各个模块进行解耦
-            # 每个模块返回独立的data item, 在env中进行更新
-            response_future = [
-                self.rollout_controller.rollout.remote(
+            response_future = []
+            for sample in group_data_items:
+                sample.data.extra_info["root_id"] = sample.uid.root_id
+                sample.data.extra_info["action_id"] = sample.uid.action_id
+                fut = self.rollout_controller.rollout.remote(
                     prompt=sample.data.messages,
                     input_ids=sample.data.input_ids,
                     sample_params=sample_params,
                     extra_params=extra_params,
                     extra_info=sample.data.extra_info,
                 )
-                for sample in group_data_items
-            ]
-            rollout_responses = await asyncio.gather(*response_future)  # RLRolloutResponseItem
+                response_future.append(fut)
+            try:
+                rollout_responses = await asyncio.wait_for(
+                    asyncio.gather(*response_future), timeout=self.rollout_timeout
+                )
+            except asyncio.TimeoutError:
+                self.logger.error("Get rollout controller response timeout and return the failed response.")
+                rollout_responses = [
+                    RLRolloutResponseItem(
+                        finish_reason="failed",
+                    )
+                    for _ in group_data_items
+                ]
             group_data_items = update_dataflow_item(group_data_items, "env.rollout", rollout_responses)
         return group_data_items
 
@@ -93,10 +128,20 @@ class SingleTurnEnvironment(BaseEnvironment):
         """
         group_data_items = await self.generate(group_data_items, sample_params, extra_params)  # type: ignore[assignment]
         skip_judger = any(
-            item.env.rollout.finish_reason == "abort" or item.env.rollout.finish_reason == "failed"
-            for item in group_data_items
+            item.env.rollout.finish_reason in ["failed", "skipped", "abort"] for item in group_data_items
         )
         if self.judger_controller and not skip_judger:
-            judger_responses: RLJudgerResponseItem = await self.judger_controller.run.remote(group_data_items)
+            try:
+                judger_responses: List[RLJudgerResponseItem] = await asyncio.wait_for(
+                    self.judger_controller.run.remote(group_data_items), timeout=self.judger_timeout
+                )
+            except asyncio.TimeoutError:
+                self.logger.error("Get judger controller response timeout and return the failed response.")
+                judger_responses = [
+                    RLJudgerResponseItem(
+                        extra_info={"state": "failed"},
+                    )
+                    for _ in group_data_items
+                ]
             group_data_items = update_dataflow_item(group_data_items, "env.judger", judger_responses)
         return group_data_items

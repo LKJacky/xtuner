@@ -30,7 +30,7 @@ class Qwen2Dense(Dense):
 
 class Qwen2DenseConfig(TransformerConfig):
     use_sliding_window: bool = False
-    bos_token_id: int | None = None
+    bos_token_id: int
 
     def build(self) -> Qwen2Dense:
         return Qwen2Dense(self)

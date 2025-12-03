@@ -8,9 +8,9 @@ import torch.distributed.nn.functional as distF
 
 from xtuner.v1.model.moe.moe import MoEModelOutputs
 from xtuner.v1.model.moe.moe import SequenceContext
-from xtuner.v1.ops.comm import split_for_sequence_parallel
 from xtuner.v1.utils import get_logger, get_padding_length, get_device
 from xtuner.v1.model import BaseModel
+from xtuner.v1.rl.utils import sp_split
 
 from .modeling_vision import InternS1VisionModel, init_world_mesh
 from .modeling_projector import InternS1MultiModalProjector
@@ -189,14 +189,11 @@ class InternS1ForConditionalGeneration(BaseModel):
     ) -> MoEModelOutputs:
         input_ids = seq_ctx.input_ids
         pixel_values = seq_ctx.pixel_values
-        image_flags = seq_ctx.image_flags
         sequence_parallel_mesh = seq_ctx.sequence_parallel_mesh
 
         inputs_embeds = self.language_model.embed_tokens(input_ids)  # type: ignore
 
-        if pixel_values is not None and image_flags is not None:
-            image_flags = cast(torch.LongTensor, image_flags.squeeze(-1))
-
+        if pixel_values is not None:
             # in-place op on custom-function outputs will spoil autograd
             inputs_embeds = inputs_embeds.clone()
 
@@ -222,19 +219,20 @@ class InternS1ForConditionalGeneration(BaseModel):
                 vit_embeds_list = distF.all_gather(vit_embeds, group=sequence_parallel_mesh.get_group())
                 vit_embeds = torch.cat(vit_embeds_list, dim=0)[:vit_batch_size]
 
-            vit_embeds = vit_embeds[image_flags == 1]
-
             if sequence_parallel_mesh is not None and sequence_parallel_mesh.size() > 1:
                 inputs_embeds_list = distF.all_gather(inputs_embeds, group=sequence_parallel_mesh.get_group())
                 inputs_embeds = torch.cat(inputs_embeds_list, dim=1)
 
+                assert input_ids is not None
                 input_ids_list = [torch.empty_like(input_ids) for _ in range(sequence_parallel_mesh.size())]
                 dist.all_gather(input_ids_list, input_ids, group=sequence_parallel_mesh.get_group())
                 input_ids = torch.cat(input_ids_list, dim=1)  # type: ignore
 
             B, N, C = inputs_embeds.shape
+            assert inputs_embeds is not None
             inputs_embeds = inputs_embeds.reshape(B * N, C)
 
+            assert input_ids is not None
             input_ids = cast(torch.LongTensor, input_ids.reshape(B * N))
 
             selected = input_ids == self.img_context_token_id
@@ -252,8 +250,7 @@ class InternS1ForConditionalGeneration(BaseModel):
             inputs_embeds = inputs_embeds.reshape(B, N, C)
 
             if sequence_parallel_mesh is not None and sequence_parallel_mesh.size() > 1:
-                inputs_embeds = split_for_sequence_parallel(inputs_embeds, dim=1, sp_mesh=sequence_parallel_mesh)
-
+                inputs_embeds = sp_split(inputs_embeds, sequence_parallel_mesh, 1, 0)
         else:
             fake_pixel_values = torch.randn(1, 3, self.image_size, self.image_size,
                                             device=inputs_embeds.device,
@@ -261,13 +258,19 @@ class InternS1ForConditionalGeneration(BaseModel):
             vit_embeds = self.extract_feature(fake_pixel_values)
             inputs_embeds = inputs_embeds + vit_embeds.sum() * 0
 
-        seq_ctx.image_flags = None
-        seq_ctx.pixel_values = None
-        seq_ctx.input_ids = None  # type: ignore
-        seq_ctx.inputs_embeds = inputs_embeds
+        # NOTE: 一定不要原地覆盖，否则第二次 forward 会缺少数据
+        lang_seq_ctx = SequenceContext(input_ids=None,
+                                       cu_seq_lens_q=seq_ctx.cu_seq_lens_q,
+                                       cu_seq_lens_k=seq_ctx.cu_seq_lens_k,
+                                       max_length_q=seq_ctx.max_length_q,
+                                       max_length_k=seq_ctx.max_length_k,
+                                       position_ids=seq_ctx.position_ids,
+                                       num_padding=seq_ctx.num_padding,
+                                       sequence_parallel_mesh=seq_ctx.sequence_parallel_mesh,
+                                       inputs_embeds=inputs_embeds)
 
         outputs = self.language_model(
-            seq_ctx,
+            lang_seq_ctx,
             loss_ctx
         )
         return outputs

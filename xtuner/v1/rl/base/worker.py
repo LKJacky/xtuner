@@ -1,5 +1,7 @@
+import json
 import math
 import os
+from itertools import chain
 from pathlib import Path
 from typing import Dict, List, TypeAlias, TypedDict, cast
 
@@ -35,9 +37,11 @@ from xtuner.v1.utils import (
     get_torch_device_module,
     monkey_unpatch_torch_reductions,
 )
+from xtuner.v1.utils.load_spec import LoadEnum
 
 from ..loss_fn import kl_penalty
 from .loss import BaseRLLossConfig, RLLossContextInputItem
+from .rollout_is import merge_rollout_is_metrics
 
 
 DeviceMeshRaw: TypeAlias = List[List[int]]  # A list of lists representing device mesh indices
@@ -174,9 +178,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         self.log_dir = None
         if log_dir is not None:
             self.log_dir = Path(log_dir) if isinstance(log_dir, str) else log_dir
-            self.log_level = os.environ.get("XTUNER_LOG_LEVEL", "INFO").upper()
             self.logger = get_logger(log_dir=self.log_dir, tag="TrainingWorker")
-
         else:
             self.logger = get_logger()
 
@@ -300,6 +302,7 @@ class TrainingWorker(SingleAcceleratorWorker):
     def fit(self, data_batches: list[WorkerInputItem], rollout_idx: int):
         # NOTE: sglang会清除logger handle, 重新创建
         self.logger = get_logger(log_dir=self.log_dir, tag="TrainingWorker")
+        loss_cfg = self.config.loss_cfg
         num_batches = len(data_batches)
         iters_per_step = math.ceil(num_batches / self._optimizer_steps)
         if num_batches < self._optimizer_steps:
@@ -322,18 +325,60 @@ class TrainingWorker(SingleAcceleratorWorker):
                     pixel_values = torch.cat(pixel_values, dim=0)
                     seq_ctx.pixel_values = pixel_values
 
+            rollout_routed_experts = seq_ctx.rollout_routed_experts
+            if rollout_routed_experts is not None:
+                if isinstance(rollout_routed_experts, list):
+                    # list[n,l,e]
+                    if not isinstance(rollout_routed_experts[0], torch.Tensor):
+                        rollout_routed_experts_refs = rollout_routed_experts
+                        rollout_routed_experts = ray.get(rollout_routed_experts_refs)
+                        # free obj store explicitly
+                        ray._private.internal_api.free(rollout_routed_experts_refs)
+                        if not isinstance(rollout_routed_experts[0], torch.Tensor):
+                            rollout_routed_experts = [
+                                torch.as_tensor(routed_experts, dtype=torch.long)
+                                for routed_experts in rollout_routed_experts
+                            ]
+                    seq_ctx.rollout_routed_experts = torch.cat(rollout_routed_experts, dim=0)  # max_len,l,e
+                else:
+                    assert isinstance(rollout_routed_experts, torch.Tensor), (
+                        f"padding experts should be a dummy tensor, bug got {type(rollout_routed_experts)}"
+                    )
+                    # convert dummy padding experts to real size
+                    language_cfg = (
+                        self.config.model_cfg.text_config
+                        if isinstance(self.config.model_cfg, VisionComposeConfigProtocol)
+                        else self.config.model_cfg
+                    )
+                    rollout_routed_experts_tensor = torch.randint(
+                        low=0,
+                        high=language_cfg.n_routed_experts,
+                        size=(
+                            self.config.pack_max_length,
+                            language_cfg.num_hidden_layers,
+                            language_cfg.num_experts_per_tok,
+                        ),
+                    )
+                    seq_ctx.rollout_routed_experts = rollout_routed_experts_tensor
+
+                assert seq_ctx.input_ids is not None, "input_ids is None"
+                assert seq_ctx.rollout_routed_experts.size(0) == seq_ctx.input_ids.size(1)
+
             seq_ctx = data["seq_ctx"].to(DEVICE)
+            rollout_logprobs = data.get("rollout_logprobs", None)
+            if rollout_logprobs is not None:
+                rollout_logprobs = rollout_logprobs.to(DEVICE)
+                rollout_logprobs_list.append(rollout_logprobs)
             loss_ctx_input = RLLossContextInputItem(
                 shifted_labels=data["shifted_labels"],
                 advantages=data["advantages"],
+                rollout_logprobs=rollout_logprobs,
             ).to(DEVICE)
             if self.sp_mesh.size() > 1:
                 seq_ctx = seq_ctx.split(self.sp_mesh)
                 loss_ctx_input = loss_ctx_input.sp_split(self.sp_mesh)
             seq_ctx_list.append(seq_ctx)
             loss_ctx_input_list.append(loss_ctx_input)
-            if "rollout_logprobs" in data and data["rollout_logprobs"] is not None:
-                rollout_logprobs_list.append(data["rollout_logprobs"].to(DEVICE))
 
         del data_batches
 
@@ -349,22 +394,32 @@ class TrainingWorker(SingleAcceleratorWorker):
         # old logprobs are inplaced updated in compute_actor_logprobs
         loss_ctx_input_list = self.compute_actor_logprobs(seq_ctx_list, loss_ctx_input_list)
         sum_entropy: torch.Tensor | None = None
+        sum_rollout_entropy: torch.Tensor | None = None
         if len(rollout_logprobs_list) > 0:
             assert len(rollout_logprobs_list) == len(loss_ctx_input_list), (
                 f"rollout_logprobs_list {len(rollout_logprobs_list)} vs loss_ctx_input_list {len(loss_ctx_input_list)}"
             )
 
         all_diffs = []
+        all_rollout_is_metrics = []
         for i, loss_ctx_input in enumerate(loss_ctx_input_list):
             mask = loss_ctx_input.shifted_labels != -100
             entropy = -(cast(torch.Tensor, loss_ctx_input.old_logprobs) * mask).sum()
             sum_entropy = entropy if sum_entropy is None else sum_entropy + entropy
+            if loss_ctx_input.rollout_logprobs is not None:
+                rollout_entropy = -(cast(torch.Tensor, loss_ctx_input.rollout_logprobs) * mask).sum()
+                sum_rollout_entropy = (
+                    rollout_entropy if sum_rollout_entropy is None else sum_rollout_entropy + rollout_entropy
+                )
+
+            if not mask.any():  # all padding tokens, skip
+                continue
 
             if len(rollout_logprobs_list) > 0:
+                # calculate logprob diff
                 rollout_logprobs = rollout_logprobs_list[i][mask]  # type: ignore[index]
                 old_logprobs = loss_ctx_input.old_logprobs[mask]  # type: ignore[index]
 
-                # 计算差异
                 assert len(rollout_logprobs.size()) == 1, (
                     f"len(rollout_logprobs.size()): {len(rollout_logprobs.size())}"
                 )
@@ -372,7 +427,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                     f"rollout_logprobs {rollout_logprobs.shape} vs old_logprobs {old_logprobs.shape}"
                 )
                 if rollout_logprobs.numel() == 0:  # pad 情况下是空的
-                    min_diff = torch.tensor(0).float()
+                    min_diff = torch.tensor(0.0)
                     max_diff = min_diff
                     std_diff = min_diff
                     mean_diff = min_diff
@@ -381,15 +436,42 @@ class TrainingWorker(SingleAcceleratorWorker):
                     max_diff = torch.max(rollout_logprobs - old_logprobs)
                     mean_diff = torch.mean(rollout_logprobs - old_logprobs)
                     if rollout_logprobs.numel() == 1:
-                        std_diff = torch.tensor(0).float()
+                        std_diff = torch.tensor(0.0)
                     else:
                         std_diff = torch.std(rollout_logprobs - old_logprobs)
                 all_diffs.append((min_diff, max_diff, mean_diff, std_diff))
 
+                # calculate importance sampling weights
+                cu_seq_lens = seq_ctx_list[i].cu_seq_lens_q
+                num_tokens = cu_seq_lens[1:] - cu_seq_lens[:-1]
+
+                rollout_is_weights, rollout_is_mask, rollout_is_metrics = (
+                    loss_cfg.rollout_is.compute_rollout_importance_weights(
+                        old_log_prob=loss_ctx_input.old_logprobs,
+                        rollout_log_prob=rollout_logprobs_list[i],
+                        num_tokens=num_tokens,
+                        response_mask=mask,
+                    )
+                )
+                loss_ctx_input.shifted_labels[~rollout_is_mask.bool()] = -100  # update loss mask
+                loss_ctx_input.is_weights = rollout_is_weights
+                all_rollout_is_metrics.append(rollout_is_metrics)
+
         logger_msg = f"Rollout {rollout_idx}: "
 
+        tis_logger_msg = ""
+        if len(all_rollout_is_metrics) > 0:
+            rollout_is_metrics = merge_rollout_is_metrics(all_rollout_is_metrics, DEVICE)
+            if len(rollout_is_metrics) > 0:
+                tis_logger_msg = (
+                    f"\n\nrollout importance sampling metrics:\n{json.dumps(rollout_is_metrics, indent=4)}"
+                )
+
+        logprob_logger_msg = ""
         if len(rollout_logprobs_list) > 0:
-            all_diffs_tensor = torch.stack([torch.tensor(d).to(DEVICE) for d in all_diffs])  # n, 4
+            all_diffs_tensor = torch.stack([torch.tensor(d).to(DEVICE) for d in all_diffs]).to(
+                dtype=torch.float32
+            )  # n, 4
             min_diff_val = torch.min(all_diffs_tensor[:, 0]).item()
             max_diff_val = torch.max(all_diffs_tensor[:, 1]).item()
             mean_diff_val = torch.mean(all_diffs_tensor[:, 2]).item()
@@ -404,11 +486,27 @@ class TrainingWorker(SingleAcceleratorWorker):
                 "logprobs_diff_mean": float(mean_diff_val),
                 "logprobs_diff_std": float(std_diff_val),
             }
+            logprob_logger_msg = f"\nlogprobs diff min {float(min_diff_val):.4f}, max {float(max_diff_val):.4f}, mean {float(mean_diff_val):.4f}, std {float(std_diff_val):.4f}, "
 
+        entropy_logger_msg = ""
         sum_entropy = cast(torch.Tensor, sum_entropy)
         dist.all_reduce(sum_entropy, op=dist.ReduceOp.SUM)
         avg_gen_entropy = sum_entropy / global_grad_tokens if global_grad_tokens > 0 else 0
-        logger_msg += f"avg generation entropy: {avg_gen_entropy:.4f}"
+        entropy_logger_msg = f"avg generation entropy: {avg_gen_entropy:.4f}"
+
+        rollout_entropy_logger_msg = ""
+        if sum_rollout_entropy is not None:
+            sum_rollout_entropy = cast(torch.Tensor, sum_rollout_entropy)
+            dist.all_reduce(sum_rollout_entropy, op=dist.ReduceOp.SUM)
+            avg_gen_entropy = sum_rollout_entropy / global_grad_tokens if global_grad_tokens > 0 else 0
+            rollout_entropy_logger_msg = f"avg rollout generation entropy: {avg_gen_entropy:.4f}"
+
+        if tis_logger_msg:
+            logger_msg += entropy_logger_msg
+            logger_msg += tis_logger_msg
+        else:
+            logger_msg += f"{entropy_logger_msg}, {rollout_entropy_logger_msg}"
+            logger_msg += logprob_logger_msg
         self.logger.info(logger_msg)
 
         if self._has_ref:
@@ -434,7 +532,6 @@ class TrainingWorker(SingleAcceleratorWorker):
             batches_seq_ctx = seq_ctx_list[i : i + iters_per_step]
             batches_loss_ctx_input = loss_ctx_input_list[i : i + iters_per_step]
 
-            loss_cfg = self.config.loss_cfg
             LossContext = loss_cfg.loss_ctx_cls
             batches_loss_kwargs = LossContext.build_batches_loss_kwargs(batches_loss_ctx_input, loss_cfg)
             engine_input = []
@@ -453,10 +550,10 @@ class TrainingWorker(SingleAcceleratorWorker):
             loss_log, other_log = self._engine.train_step(
                 data_batches=engine_input,
             )
-            other_log = self._update_other_log(other_log)
+            other_log = self._update_other_log(other_log)  # type: ignore[arg-type]
             grad_norm = self._engine.clip_grad_norm()
             self._engine.step_optimizer(grad_norm)
-            log_info = dict()
+            log_info = dict()  # type: ignore[var-annotated]
             log_info.update(loss_log)
             for k, v in other_log.items():
                 if k == "extra_info":
@@ -483,6 +580,10 @@ class TrainingWorker(SingleAcceleratorWorker):
         # sp will affect the data replicate size in worker
         return self._engine.data_replicate_size * self.sp_mesh.size()
 
+    def get_model_cfg(self):
+        model_cfg = self._engine.model_cfg
+        return model_cfg
+
     def offload_model(self):
         self._engine.put_model_to_device("cpu")
         DEVICE_MODULE.empty_cache()
@@ -506,16 +607,26 @@ class TrainingWorker(SingleAcceleratorWorker):
         self._engine.put_optimizer_to_device(DEVICE)
 
     def update_rollout_info(
-        self, engine_mesh_list: DeviceMeshRaw, server_url_dict: ServiceUrlMap, rollout_config: RolloutConfig
+        self,
+        engine_mesh_list: DeviceMeshRaw,
+        server_url_dict: ServiceUrlMap,
+        rollout_config: RolloutConfig,
+        worker_server_urls_status: Dict[str, bool],
     ):
         """Update the rollout information for the training worker."""
         tp = rollout_config.tensor_parallel_size
         ep = rollout_config.expert_parallel_size
         assert tp == 1 or ep == 1, "Either tensor parallel size or engine parallel size must be 1."
-        self.rollout_device_mesh = DeviceMesh(
-            "cpu", mesh=engine_mesh_list, mesh_dim_names=("engine_instance", "engine_parallel")
-        )
-        self.rollout_url = server_url_dict.get(self.rank, "")
+        if self.rollout_device_mesh is None:
+            self.rollout_device_mesh = DeviceMesh(
+                "cpu", mesh=engine_mesh_list, mesh_dim_names=("engine_instance", "engine_parallel")
+            )
+        rollout_server_url = server_url_dict.get(self.rank, "")
+        if worker_server_urls_status.get(rollout_server_url, "False") is False:
+            self.logger.error(f"Rollout server url {rollout_server_url} is not available.")
+            self.rollout_url = None
+        else:
+            self.rollout_url = rollout_server_url
         self.rollout_cfg_info["tp"] = tp
         self.rollout_cfg_info["ep"] = ep
         self.rollout_cfg_info["api_key"] = rollout_config.api_key
@@ -526,9 +637,51 @@ class TrainingWorker(SingleAcceleratorWorker):
                 "lmdeploy_backend", "pytorch"
             )
 
-    # TODO(hha): 这个逻辑和某个模型绑定死了。一定要重构掉
-    # TODO(hha): 如果有 freeze 参数应该不需要同步
     def update_weights(self):
+        """Update the model weights."""
+        if self.rollout_cfg_info.get("backend") == "turbomind":
+            self._update_weights_by_layer()
+        else:
+            self._update_weights_hf_generator()
+
+    def _update_weights_hf_generator(self):
+        """Update the model weights."""
+        self.endpoints["update_weights"] = "update_weights"
+        assert self.rollout_device_mesh is not None
+
+        model = self._engine.model
+        DEVICE_MODULE.empty_cache()
+
+        if isinstance(model.config, VisionComposeConfigProtocol):
+            dtype = torch.bfloat16
+        else:
+            if (model.config.float8_cfg is not None) and (model.config.float8_cfg.enable_float8):
+                dtype = torch.float8_e4m3fn
+            else:
+                dtype = torch.bfloat16
+
+        same_gen = model._get_same_hf_param(model._group_param_by_load_spec(LoadEnum.SAME), dtype=dtype, device=DEVICE)
+        fused_gen = model._get_fused_hf_param(
+            model._group_param_by_load_spec(LoadEnum.FUSED),
+            dtype=dtype,
+            device=DEVICE,
+            return_full_key_per_rank=True,
+        )
+        shard_gen = model._get_shard_hf_param(
+            model._group_param_by_load_spec(LoadEnum.SHARD), dtype=dtype, device=DEVICE
+        )
+        for name_list, param_list in chain(same_gen, fused_gen, shard_gen):
+            state_dict = {name: param.detach() for name, param in zip(name_list, param_list)}
+            self.request_update_params(state_dict, finished=False)
+
+        if self.rollout_cfg_info["backend"] == "pytorch":
+            self.request_update_params({}, finished=True)
+
+        dist.barrier()
+        DEVICE_MODULE.empty_cache()
+        return
+
+    def _update_weights_by_layer(self):
         """Update the model weights."""
         self.endpoints["update_weights"] = "update_weights"
         assert self.rollout_device_mesh is not None
@@ -594,14 +747,8 @@ class TrainingWorker(SingleAcceleratorWorker):
                 name_list.append(name)
                 tensor_list.append((local_tensor, load_spec))
             fsdp_unshard_tensor_list, name_list = get_params(tensor_list, name_list, dtype)
-            if self.rollout_cfg_info["backend"] == "pytorch":
-                state_dict = dict(zip(name_list, fsdp_unshard_tensor_list))
-                self.request_update_params(state_dict)
-            else:
-                state_dict = []
-                for name, tensor in zip(name_list, fsdp_unshard_tensor_list):
-                    state_dict.append((name, tensor))
-                self.request_update_params(state_dict)
+            state_dict = dict(zip(name_list, fsdp_unshard_tensor_list))
+            self.request_update_params(state_dict)
 
         for name, param in model.state_dict().items():
             if name in saved_list:
@@ -629,14 +776,8 @@ class TrainingWorker(SingleAcceleratorWorker):
             tensor_list = [(local_tensor, load_spec)]
             name_list = [name]
             fsdp_unshard_tensor_list, name_list = get_params(tensor_list, name_list, dtype)
-            if self.rollout_cfg_info["backend"] == "pytorch":
-                state_dict = dict(zip(name_list, fsdp_unshard_tensor_list))
-                self.request_update_params(state_dict)
-            else:
-                state_dict = []
-                for name, tensor in zip(name_list, fsdp_unshard_tensor_list):
-                    state_dict.append((name, tensor))
-                self.request_update_params(state_dict)
+            state_dict = dict(zip(name_list, fsdp_unshard_tensor_list))
+            self.request_update_params(state_dict)
 
         if self.rollout_cfg_info["backend"] == "pytorch":
             self.request_update_params({}, finished=True)
@@ -843,21 +984,49 @@ class TrainingWorker(SingleAcceleratorWorker):
         cpu_mesh = self.rollout_device_mesh["engine_parallel"]
         cpu_group = cpu_mesh.get_group()
         head_rank = cpu_mesh.mesh[0].item()
-
+        if self.rollout_url is None:
+            self.logger.error(f"rank {self.rank} url in None, cannot update weights and skip")
+            return
         if self.rollout_cfg_info["backend"] == "pytorch":
             # TODO(chenchiyu): remove lmdeploy related code
             from lmdeploy.utils import serialize_state_dict
 
+            try:
+                from lmdeploy.utils import FlattenedTensorBucket
+
+                use_flattened_tensor_bucket = True
+            except Exception:
+                use_flattened_tensor_bucket = False
+
             if self.rollout_cfg_info["backend"] == "pytorch" and self.rollout_cfg_info["tp"] > 1:
                 serialized_data = [None] * self.rollout_cfg_info["tp"]
+                if use_flattened_tensor_bucket:
+                    flattened_tensor_bucket = FlattenedTensorBucket(named_tensors=list(state_dict.items()))
+                    metadata = flattened_tensor_bucket.get_metadata()
+                    flattened_tensor_data = {
+                        "flattened_tensor": flattened_tensor_bucket.get_flattened_tensor(),
+                        "metadata": metadata,
+                    }
+                    tp_serialized_data = serialize_state_dict(flattened_tensor_data)
+                else:
+                    tp_serialized_data = serialize_state_dict(state_dict)
                 dist.gather_object(
-                    serialize_state_dict(state_dict),
+                    tp_serialized_data,
                     serialized_data if dist.get_rank() == head_rank else None,
                     dst=head_rank,
                     group=cpu_group,
                 )
             elif self.rollout_cfg_info["backend"] == "pytorch":
-                serialized_data = serialize_state_dict(state_dict)
+                if use_flattened_tensor_bucket:
+                    flattened_tensor_bucket = FlattenedTensorBucket(named_tensors=list(state_dict.items()))
+                    metadata = flattened_tensor_bucket.get_metadata()
+                    flattened_tensor_data = {
+                        "flattened_tensor": flattened_tensor_bucket.get_flattened_tensor(),
+                        "metadata": metadata,
+                    }
+                    serialized_data = serialize_state_dict(flattened_tensor_data)
+                else:
+                    serialized_data = serialize_state_dict(state_dict)
             else:
                 # for turbomind backend, only head_rank should serialize data
                 serialized_data = serialize_state_dict(state_dict) if dist.get_rank() == head_rank else None
@@ -875,6 +1044,7 @@ class TrainingWorker(SingleAcceleratorWorker):
 
             # NOTE: xtuner目前去掉sglang的patch也不会出问题，但为了保险起见，还是保留patch逻辑，并且在update_weights结束后unpatch
             monkey_patch_torch_reductions()
+            state_dict = state_dict.items()
             if self.rollout_cfg_info["tp"] == 1:
                 if use_flattened_tensor_bucket:
                     flattened_tensor_bucket = FlattenedTensorBucket(named_tensors=state_dict)
@@ -939,6 +1109,15 @@ class TrainingWorker(SingleAcceleratorWorker):
                 response.raise_for_status()
             else:
                 data = dict(serialized_named_tensors=serialized_data, finished=finished)
+                try:
+                    from lmdeploy.utils import FlattenedTensorBucket
+
+                    use_flattened_tensor_bucket = True
+                except Exception:
+                    use_flattened_tensor_bucket = False
+
+                if use_flattened_tensor_bucket:
+                    data["load_format"] = "flattened_bucket"
                 response = requests.post(
                     f"{self.rollout_url}/{self.endpoints['update_weights']}", headers=headers, json=data
                 )

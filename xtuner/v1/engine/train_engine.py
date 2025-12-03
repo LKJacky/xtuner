@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, cast
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
+from pydantic import ConfigDict
 from safetensors import safe_open
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
@@ -21,6 +22,7 @@ from torch.nn.utils.clip_grad import _no_grad
 from torch.utils._foreach_utils import (
     _device_has_foreach_support,
 )
+from typing_extensions import NotRequired, TypedDict
 
 from xtuner.v1.config import FSDPConfig, OptimConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
@@ -38,6 +40,22 @@ DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
 
 threading_lock = threading.Lock()
+
+
+class LossLog(TypedDict):
+    __pydantic_config__ = ConfigDict(arbitrary_types_allowed=True)  # type: ignore[misc]
+    total_loss: float
+    reduced_llm_loss: float
+    reduced_balancing_loss: NotRequired[float]
+    reduced_z_loss: NotRequired[float]
+
+
+class OtherLog(TypedDict):
+    __pydantic_config__ = ConfigDict(arbitrary_types_allowed=True)  # type: ignore[misc]
+    maxvio: NotRequired[float]
+    consumed_tokens: float
+    extra_info: ModelForwardExtraLogInfo
+    efficient_attn_ratio: float
 
 
 class CPUThreadTaskCoordinator:
@@ -135,6 +153,15 @@ class TrainEngine:
         self.optimizer = self.build_optimizer(optim_cfg)
         self.intra_layer_micro_batch = intra_layer_micro_batch
         self._count = 0
+        self.has_freeze_params = self.__has_freeze_params()
+
+    def __has_freeze_params(self) -> bool:
+        has_freeze_params = False
+        for param in self.model.parameters(recurse=True):
+            if not param.requires_grad:
+                has_freeze_params = True
+                break
+        return has_freeze_params
 
     def build_model(self) -> BaseModel:
         with torch.device("meta"):
@@ -190,7 +217,7 @@ class TrainEngine:
         intra_layer_micro_batch = self.intra_layer_micro_batch
         return data_batches_len // intra_layer_micro_batch
 
-    def train_step(self, data_batches: list[ModelItem]):
+    def train_step(self, data_batches: list[ModelItem]) -> tuple[LossLog, OtherLog]:
         """Perform a training step with the given data batches and mesh.
 
         Args:
@@ -199,8 +226,8 @@ class TrainEngine:
         if self.float8_handler is not None and self.float8_handler.enabled:
             self.float8_handler.precompute_float8_dynamic_scale_for_fsdp(self.model)
 
-        loss_log = {}
-        other_log: Dict[str, Any] = {}
+        loss_log: LossLog = {}  # type: ignore[typeddict-item]
+        other_log: OtherLog = {}  # type: ignore[typeddict-item]
         intra_layer_micro_batch = self.intra_layer_micro_batch
         assert len(data_batches) % intra_layer_micro_batch == 0, (
             f"data_batches length {len(data_batches)} is not divisible by intra_layer_micro_batch {intra_layer_micro_batch}"
@@ -406,7 +433,7 @@ class TrainEngine:
             if optimizer_dir is not None:
                 optimizer_dir.mkdir(parents=True, exist_ok=True)
 
-        _options = StateDictOptions(cpu_offload=True, ignore_frozen_params=True)
+        _options = StateDictOptions(cpu_offload=True, ignore_frozen_params=self.model_cfg.dcp_ignore_frozen_params)
         with profile_time_and_memory(f"[DCP Checkpoint to {model_dir}]"):
             model_state = get_model_state_dict(self.model, options=_options)
             dcp.save(
@@ -434,8 +461,13 @@ class TrainEngine:
         Args:
             dcp_dir (str): The directory to load the model from.
         """
-        _load_options = StateDictOptions(cpu_offload=True, ignore_frozen_params=True)
-        _set_options = StateDictOptions(cpu_offload=True, strict=True)
+        _load_options = StateDictOptions(
+            cpu_offload=True, ignore_frozen_params=self.model_cfg.dcp_ignore_frozen_params
+        )
+        if self.has_freeze_params:
+            _set_options = StateDictOptions(cpu_offload=True, strict=False)
+        else:
+            _set_options = StateDictOptions(cpu_offload=True, strict=True)
         with profile_time_and_memory(f"[Load DCP Model from {model_dir}]"):
             shard_model_state_dict = get_model_state_dict(self.model, options=_load_options)
             # inplace state_dict

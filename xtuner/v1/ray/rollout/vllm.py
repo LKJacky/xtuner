@@ -1,7 +1,6 @@
 from argparse import Namespace
 from typing import Any, Dict, List, Union
 
-import ray
 import uvloop
 from vllm.entrypoints.openai.api_server import run_server
 from vllm.entrypoints.openai.cli_args import make_arg_parser
@@ -16,7 +15,6 @@ def run_vllm_server_wrapper(server_args):
     uvloop.run(run_server(server_args))
 
 
-@ray.remote
 class vLLMWorker(RolloutWorker):
     def __init__(
         self,
@@ -61,14 +59,7 @@ class vLLMWorker(RolloutWorker):
         payload.update(sample_params)
         payload.update(extra_params)
 
-        req = self.client.build_request(
-            "POST",
-            url,
-            headers=headers,
-            json=payload,
-        )
-        r = await self.client.send(req, stream=True)
-        return payload, r
+        return await self._safe_post_request(url, headers, payload)
 
     def get_logprobs(self, input_ids, sampling_params):
         pass

@@ -334,7 +334,7 @@ class ReplayBufferStorage:
         for attr in attrs_to_clear:
             getattr(self, attr).clear()
 
-    def get(self, global_batch_size: int) -> Tuple[List[List[RLDataFlowItem]], List[Dict[str, Any]]]:
+    def get(self, global_batch_size: int) -> Tuple[List[List[RLDataFlowItem]], List[Dict[str, Any] | None]]:
         """Retrieves a batch of finished sample groups from the buffer.
 
         Args:
@@ -368,11 +368,11 @@ class ReplayBufferStorage:
                 multimodal_train_info = None
                 # TODO: 是否需要额外返回不重复的 multimodal_train_infos？
                 for data_item in group_samples:
-                    if "multimodal_train_info" in data_item.data:
-                        multimodal_train_info = data_item.data.pop("multimodal_train_info")
+                    if hasattr(data_item.data, "multimodal_train_info"):
+                        multimodal_train_info = data_item.data.multimodal_train_info
+                        del data_item.data.multimodal_train_info
                 samples.append(group_samples)
-                if multimodal_train_info is not None:
-                    multimodal_train_infos.append(multimodal_train_info)
+                multimodal_train_infos.append(multimodal_train_info)
             self._returned = remain_finished_list
 
             return samples, multimodal_train_infos
