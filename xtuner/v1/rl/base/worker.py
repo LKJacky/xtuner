@@ -432,13 +432,14 @@ class TrainingWorker(SingleAcceleratorWorker):
                     std_diff = min_diff
                     mean_diff = min_diff
                 else:
-                    min_diff = torch.min(rollout_logprobs - old_logprobs)
-                    max_diff = torch.max(rollout_logprobs - old_logprobs)
-                    mean_diff = torch.mean(rollout_logprobs - old_logprobs)
+                    log_probs_diff = (rollout_logprobs - old_logprobs).abs()
+                    min_diff = torch.min(log_probs_diff)
+                    max_diff = torch.max(log_probs_diff)
+                    mean_diff = torch.mean(log_probs_diff)
                     if rollout_logprobs.numel() == 1:
                         std_diff = torch.tensor(0.0)
                     else:
-                        std_diff = torch.std(rollout_logprobs - old_logprobs)
+                        std_diff = torch.std(log_probs_diff)
                 all_diffs.append((min_diff, max_diff, mean_diff, std_diff))
 
                 # calculate importance sampling weights
