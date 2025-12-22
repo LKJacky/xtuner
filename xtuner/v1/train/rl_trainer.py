@@ -417,11 +417,13 @@ class RLTrainer:
 
             # 4. Training Step
             with timer("training", step_timer_dict):
-                ray.get(
+                info = ray.get(
                     self._train_controller.fit.remote(
                         data_batches, pack_max_length=self._train_worker_cfg.pack_max_length, rollout_idx=rollout_idx
                     )
                 )
+                for key in info:
+                    self.tb_writer.add_scalar(f"{key}", info[key], self.cur_step)
 
             # 5. Saving and sync weights
             with timer("saving and sync_weight", step_timer_dict):
