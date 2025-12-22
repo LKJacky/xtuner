@@ -481,14 +481,27 @@ class TrainingWorker(SingleAcceleratorWorker):
             else:
                 std_diff_val = torch.std(all_diffs_tensor[:, 3]).item()
             logger_msg += f"logprobs diff min {float(min_diff_val):.4f}, max {float(max_diff_val):.4f}, mean {float(mean_diff_val):.4f}, std {float(std_diff_val):.4f}, "
-            diff_info = {
-                "logprobs_diff_min": float(min_diff_val),
-                "logprobs_diff_max": float(max_diff_val),
-                "logprobs_diff_mean": float(mean_diff_val),
-                "logprobs_diff_std": float(std_diff_val),
-            }
-            logprob_logger_msg = f"\nlogprobs diff min {float(min_diff_val):.4f}, max {float(max_diff_val):.4f}, mean {float(mean_diff_val):.4f}, std {float(std_diff_val):.4f}, "
 
+            logprob_logger_msg = f"\nlogprobs diff min {float(min_diff_val):.4f}, max {float(max_diff_val):.4f}, mean {float(mean_diff_val):.4f}, std {float(std_diff_val):.4f}, "
+            min_diff_val = torch.tensor([min_diff_val]).cuda()
+            max_diff_val = torch.tensor([max_diff_val]).cuda()
+            mean_diff_val = torch.tensor([mean_diff_val]).cuda()
+            std_diff_val = torch.tensor([std_diff_val]).cuda()
+        else:
+            min_diff_val = torch.tensor([0.0]).cuda()
+            max_diff_val = torch.tensor([0.0]).cuda()
+            mean_diff_val = torch.tensor([0.0]).cuda()
+            std_diff_val = torch.tensor([0.0]).cuda()
+        dist.all_reduce(min_diff_val, op=dist.ReduceOp.MIN)
+        dist.all_reduce(max_diff_val, op=dist.ReduceOp.MAX)
+        dist.all_reduce(mean_diff_val, op=dist.ReduceOp.AVG)
+        dist.all_reduce(std_diff_val, op=dist.ReduceOp.AVG)
+        diff_info = {
+            "logprobs_diff_min": min_diff_val.item(),
+            "logprobs_diff_max": max_diff_val.item(),
+            "logprobs_diff_mean": mean_diff_val.item(),
+            "logprobs_diff_std": std_diff_val.item(),
+        }
         entropy_logger_msg = ""
         sum_entropy = cast(torch.Tensor, sum_entropy)
         dist.all_reduce(sum_entropy, op=dist.ReduceOp.SUM)
@@ -528,7 +541,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             dist.all_reduce(kl_div_sum, op=dist.ReduceOp.SUM)
             avg_kl_div = kl_div_sum / global_grad_tokens if global_grad_tokens > 0 else 0
             self.logger.info(f"Rollout {rollout_idx}: avg KL divergence: {avg_kl_div:.4f}")
-        all_log_infos = [diff_info]
+        loss_info = []
         for i in range(0, len(seq_ctx_list), iters_per_step):
             batches_seq_ctx = seq_ctx_list[i : i + iters_per_step]
             batches_loss_ctx_input = loss_ctx_input_list[i : i + iters_per_step]
@@ -569,8 +582,9 @@ class TrainingWorker(SingleAcceleratorWorker):
             )
             log_str = f"Rollout {rollout_idx} Step {i}: " + log_str
             self.logger.info(log_str)
-            all_log_infos.append(log_info)
-        return all_log_infos
+            loss_info.append({"loss": loss_log["reduced_llm_loss"], "grad_nrom": log_info["grad_norm"]})
+
+        return {"diff_info": diff_info, "loss_info": loss_info, "entropy": avg_gen_entropy.item()}
 
     def save_hf(self, hf_dir: str, save_dtype: torch.dtype = torch.bfloat16):
         self._engine.save_hf(hf_dir, save_dtype)
