@@ -256,6 +256,21 @@ class RawTrainingController:
                     rollout_idx=rollout_idx,
                 )
             )
+        train_infos = ray.get(handles)[0]
+        log_infos = {}
+        log_infos["num_samples"] = len(data_batches)
+        log_infos["advantage_mean"] = sum([data["advantage"] for data in data_batches]) / len(data_batches)
+        log_infos["length_mean"] = (
+            sum((data["seq_ctx"].max_length_q for data in data_batches)) / len(data_batches)
+        ).item()
+        log_infos.update(train_infos)
+
+        log_infos.update(log_infos.pop("diff_info"))
+        loss = sum([info["loss"] for info in log_infos["loss_info"]]) / len(log_infos)
+        grad_norm = sum([info["grad_nrom"] for info in log_infos["loss_info"]]) / len(log_infos)
+        log_infos.update({"loss": loss, "grad_norm": grad_norm})
+        log_infos.pop("loss_info")
+        log_infos = {f"v1_train/{k}": v for k, v in log_infos.items()}
         log_infos = ray.get(handles)
         return log_infos
 
