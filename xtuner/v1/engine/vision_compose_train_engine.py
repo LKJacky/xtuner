@@ -1,20 +1,14 @@
 from pathlib import Path
-from typing import List, Protocol, cast, runtime_checkable
+from typing import List, cast
 
 import torch
 import torch.distributed as dist
-from pydantic import BaseModel
 from torch.distributed.device_mesh import DeviceMesh
-from typing_extensions import Self
 
 from transformers import AutoProcessor
-from transformers.configuration_utils import PretrainedConfig
-from xtuner.v1.config import FSDPConfig
-from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
-from xtuner.v1.loss import BaseLossContext
-from xtuner.v1.model.base import BaseModel as XTunerBaseModel
-from xtuner.v1.model.base import ModelItem, ModelOutputs, TransformerConfig
+from xtuner.v1.model.base import ModelItem
+from xtuner.v1.model.compose.base import BaseComposeConfig, BaseComposeModel
 from xtuner.v1.model.moe.moe import MoEModelOutputs
 from xtuner.v1.model.utils import ModelForwardExtraLogInfo
 from xtuner.v1.module.router import NoAuxRouterConfig
@@ -28,65 +22,23 @@ DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
 
 
-@runtime_checkable
-class VisionComposeModelProtocol(Protocol):
-    vision_tower: XTunerBaseModel
-    multi_modal_projector: XTunerBaseModel
-    language_model: XTunerBaseModel
-
-    def set_hf(self, hf_path: str | Path): ...
-
-    def from_hf(self, hf_path: str | Path, strict: bool = True) -> tuple: ...
-
-    def fully_shard(self, fsdp_cfg: FSDPConfig) -> Self: ...
-
-    def forward(
-        self,
-        seq_ctx: list[SequenceContext] | SequenceContext,
-        loss_ctx: list[BaseLossContext] | BaseLossContext | None,
-    ) -> ModelOutputs | MoEModelOutputs: ...
-
-    def __call__(
-        self,
-        seq_ctx: list[SequenceContext] | SequenceContext,
-        loss_ctx: list[BaseLossContext] | BaseLossContext | None,
-    ) -> ModelOutputs | MoEModelOutputs: ...
-
-
-@runtime_checkable
-class VisionComposeConfigProtocol(Protocol):
-    vision_config: BaseModel
-    projector_config: BaseModel
-    text_config: TransformerConfig
-
-    freeze_vision: bool = False
-    freeze_projector: bool = False
-    freeze_language: bool = False
-    dcp_ignore_frozen_params: bool = True
-
-    def build(self) -> VisionComposeModelProtocol: ...
-
-    @property
-    def hf_config(self) -> PretrainedConfig | None: ...
-
-
 class VisionComposeTrainEngine(TrainEngine):
-    model_cfg: VisionComposeConfigProtocol  # type: ignore
-    model: VisionComposeModelProtocol  # type: ignore
+    model_cfg: BaseComposeConfig  # type: ignore
+    model: BaseComposeModel  # type: ignore
     llm_float8_handler: Float8Handler | None
     vision_float8_handler: Float8Handler | None
     projector_float8_handler: Float8Handler | None
 
     def __init__(
         self,
-        model_cfg: VisionComposeConfigProtocol,
+        model_cfg: BaseComposeConfig,
         *args,
         **kwargs,
     ) -> None:
         self._processor = None  # only for save
         super().__init__(model_cfg, *args, **kwargs)  # type: ignore
 
-    def build_model(self) -> VisionComposeModelProtocol:  # type: ignore
+    def build_model(self) -> BaseComposeModel:  # type: ignore
         with torch.device("meta"):
             model = self.model_cfg.build()
 
@@ -188,11 +140,12 @@ class VisionComposeTrainEngine(TrainEngine):
         step_llm_loss = torch.tensor(0.0, device=DEVICE)
         step_balancing_loss: torch.Tensor | None = None
         step_z_loss: torch.Tensor | None = None
-        step_consumed_tokens = torch.tensor(0.0, device=DEVICE)
+        step_consumed_tokens = torch.tensor(0, device=DEVICE)
         efficient_forward_tokens = torch.tensor(0, device=DEVICE, dtype=torch.long)
         total_forward_tokens = torch.tensor(0, device=DEVICE, dtype=torch.long)
 
         train_engine_extra_info = ModelForwardExtraLogInfo()
+        step_consumed_img_tokens = 0.0
         for i in range(0, len(data_batches), intra_layer_micro_batch):
             data_batch = data_batches[i : i + intra_layer_micro_batch]
             seq_ctx_list = []
@@ -203,6 +156,11 @@ class VisionComposeTrainEngine(TrainEngine):
                 seq_ctx_list.append(seq_ctx)
                 loss_ctx_list.append(loss_ctx)
                 step_consumed_tokens += seq_ctx.mask.sum()
+
+                if seq_ctx.num_img_tokens is not None:
+                    step_consumed_img_tokens += sum(seq_ctx.num_img_tokens)
+                    if seq_ctx.sequence_parallel_mesh:
+                        step_consumed_img_tokens /= seq_ctx.sequence_parallel_mesh.size()
 
                 num_tokens = seq_ctx.cu_seq_lens_k[1:] - seq_ctx.cu_seq_lens_k[:-1]
                 efficient_forward_tokens += (num_tokens**2).sum()
@@ -252,7 +210,7 @@ class VisionComposeTrainEngine(TrainEngine):
         reduced_llm_loss = step_llm_loss
         dist.all_reduce(reduced_llm_loss.div_(dist.get_world_size()))
 
-        loss_log["total_loss"] = step_loss.item()
+        loss_log["local_loss"] = step_loss.item()
         loss_log["reduced_llm_loss"] = reduced_llm_loss.item()
         if step_balancing_loss is not None:
             reduced_balancing_loss = step_balancing_loss
@@ -262,7 +220,8 @@ class VisionComposeTrainEngine(TrainEngine):
             reduced_z_loss = step_z_loss
             dist.all_reduce(reduced_z_loss.div_(dist.get_world_size()))
             loss_log["reduced_z_loss"] = reduced_z_loss.item()
-        other_log["consumed_tokens"] = step_consumed_tokens.item()
+        other_log["step_consumed_tokens"] = cast(int, step_consumed_tokens.item())
         other_log["extra_info"] = train_engine_extra_info  # type: ignore[assignment]
         other_log["efficient_attn_ratio"] = (efficient_forward_tokens / total_forward_tokens).item()
+        other_log["step_consumed_img_tokens"] = step_consumed_img_tokens
         return loss_log, other_log

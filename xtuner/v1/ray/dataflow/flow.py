@@ -6,6 +6,7 @@ import httpx
 import ray
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict
+from ray.actor import ActorProxy
 from tqdm.auto import tqdm
 from typing_extensions import Annotated
 
@@ -13,7 +14,7 @@ from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RolloutState
 from xtuner.v1.ray.environment import SingleTurnEnvironment
 from xtuner.v1.ray.rollout.controller import SampleParams
 from xtuner.v1.ray.utils import create_task
-from xtuner.v1.utils import get_logger
+from xtuner.v1.utils import get_logger, ray_method
 
 from .replay_buffer import ReplayBuffer, ReplayBufferConfig, determine_group_state
 
@@ -79,8 +80,7 @@ class DataFlowConfig(BaseModel):
         self.worker_log_dir.mkdir(parents=True, exist_ok=True)
 
 
-@ray.remote
-class DataFlow:
+class RawDataFlow:
     """A Ray actor that manages the data flow for reinforcement learning.
 
     This class is responsible for sampling prompts, interacting with the environment or to generate responses,
@@ -165,10 +165,12 @@ class DataFlow:
         )
         self.logger.info(logger_msg)
 
+    @ray_method
     def get_train_dataset_length(self):
         """Gets the length of the training dataset from the replay buffer."""
         return ray.get(self.replay_buffer.get_train_dataset_length.remote())
 
+    @ray_method
     async def worker_task(self, group_samples_for_retry: Optional[List[RLDataFlowItem]] = None):
         """A single worker task to generate and process a group of samples.
 
@@ -301,6 +303,7 @@ class DataFlow:
         self.logging_replaybuffer_state()
         self.logger.info(ray.get(self.env_controller.get_rollout_stats.remote()))  # type: ignore[attr-defined]
 
+    @ray_method
     async def pause(self, timeout: float = 60.0):
         """Asynchronously sends abort requests to all rollout workers."""
         if not self.worker_url_list:
@@ -322,6 +325,7 @@ class DataFlow:
         else:
             self.logger.debug(f"All {succeeded_count} abort requests sent successfully.")
 
+    @ray_method
     async def run(
         self,
         num: Optional[int] = None,
@@ -345,14 +349,14 @@ class DataFlow:
         if resume:
             assert resume_path, "Resuming is enabled but no resume path is provided."
             self.logger.info(f"Resuming replay buffer from {resume_path}")
-            await self.replay_buffer.resume.remote(resume_path)
+            await self.replay_buffer.resume_storage.remote(resume_path)
 
         await self.concurrent_task_runner()
 
         if dump:
             assert dump_path, "Dumping is enabled but no dump path is provided."
             self.logger.info(f"Dump replay buffer from {dump_path}")
-            await self.replay_buffer.dump.remote(dump_path)
+            await self.replay_buffer.dump_storage.remote(dump_path)
 
         return await self.replay_buffer.get_samples.remote(self.target_batch_size)  # type: ignore[attr-defined]
 
@@ -375,3 +379,23 @@ class DataFlow:
         except Exception as e:
             self.logger.error(f"Failed to send abort request to {url}: {e}")
             return url, False
+
+    def save(self, save_path: Path | str):
+        """Saves the replay buffer to the specified path.
+
+        Args:
+            save_path (str): The path to the checkpoint file to save to.
+        """
+        ray.get(self.replay_buffer.save.remote(save_path))
+
+    def resume(self, resume_path: Path | str):
+        """Resumes the replay buffer from the specified path.
+
+        Args:
+            resume_path (str): The path to the checkpoint file to resume from.
+        """
+        ray.get(self.replay_buffer.resume.remote(resume_path))
+
+
+DataFlow = ray.remote(RawDataFlow)
+DataFlowProxy = ActorProxy[RawDataFlow]

@@ -61,6 +61,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.accelerator = accelerator
         self.server_func: Callable
         self.endpoints: dict[str, str] = dict()
+        self.engine_rank_mesh_array: list[list[int]]
         # http_concurrency is calculated based on the max batch size per engine and the total number of engines
         assert config.rollout_max_batch_size_per_instance, (
             "rollout_max_batch_size_per_instance must be set in RolloutConfig"
@@ -94,8 +95,12 @@ class RolloutWorker(SingleAcceleratorWorker):
             placement_group_capture_child_tasks=True,
             placement_group_bundle_index=self.engine_bundle_idxs[0],
         )
+        local_rank = int(ray.get_runtime_context().get_accelerator_ids()[self.accelerator][0])
+        start_port = self.config.dist_port_base + local_rank * 1024
         self.host, self.ports = ray.get(
-            find_master_addr_and_port.options(scheduling_strategy=scheduling_strategy).remote(3)
+            find_master_addr_and_port.options(scheduling_strategy=scheduling_strategy).remote(
+                nums=3, start_port=start_port, max_tries=1024
+            )
         )
         self.dist_port = self.ports[0]
         self.server_port = self.ports[1]
@@ -118,6 +123,9 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.dist_init_addr = dist_init_addr if dist_init_addr else self.dist_init_addr
         self.launch_server()
         return (self.rank, self.server_url)
+
+    def set_engine_rank_mesh_array(self, engine_rank_mesh_array: list[list[int]]):
+        self.engine_rank_mesh_array = engine_rank_mesh_array
 
     def set_engine_bundle_idxs(self, engine_bundle_idxs: list[int]):
         """Set the bundle indices for the inference engine.
@@ -486,16 +494,22 @@ class RolloutWorker(SingleAcceleratorWorker):
                         "enable_return_routed_experts is True, but routed_experts is not in meta_info"
                     )
                     routed_experts = response["meta_info"]["routed_experts"]  # token[layer[expert]]
-                    if isinstance(routed_experts, str):
-                        import base64
+                    if routed_experts is not None:
+                        if isinstance(routed_experts, str):
+                            import base64
 
-                        data = base64.b64decode(routed_experts)
-                        routed_experts = ray.cloudpickle.loads(data)
+                            data = base64.b64decode(routed_experts)
+                            routed_experts = ray.cloudpickle.loads(data)
+                        else:
+                            routed_experts = torch.tensor(routed_experts)  # n,layer,expert
+                            routed_experts = ray.put(routed_experts)
+                        extra_info = {"routed_experts": routed_experts}
                     else:
-                        routed_experts = torch.tensor(routed_experts)  # n,layer,expert
-                        routed_experts = ray.put(routed_experts)
-                    extra_info = {"routed_experts": routed_experts}
-
+                        # NOTE: If finish_reason is 'abort', some queries may not have entered the inference engine,
+                        # so the returned expert can be None. If finish_reason is 'completed', an expert must be returned.
+                        assert finish_reason == "abort", (
+                            f"routed_experts is None, finish_reason should be abort, but got {finish_reason}"
+                        )
                 # NOTE: When set return_token_ids = True, the response must contain valid token_ids/logprobs.
                 # If not, we consider it as an invalid response and retry it.
                 # NOTE: !!! When finish_reason is abort, some queries may not return token_ids or logprobs. !!!
@@ -509,7 +523,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                         finish_reason=finish_reason,
                         logprobs=last_logprobs,
                         extra_info=extra_info,
-                        state=RolloutState.COMPLETED if finish_reason == "abort" else RolloutState.COMPLETED,
+                        state=RolloutState.ABORTED if finish_reason == "abort" else RolloutState.COMPLETED,
                     )
                 return rollout_response
             except KeyError as e:
